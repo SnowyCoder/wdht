@@ -2,11 +2,11 @@ use std::sync::{RwLock, Mutex, Arc};
 
 use log::{error, debug, info};
 
-use crate::{ktree::KTree, config::SystemConfig, contacter::{Transport, Request, Response}, id::Id, storage::Storage, search::{BasicSearch, BasicSearchOptions}};
+use crate::{ktree::KTree, config::SystemConfig, transport::{TransportSender, Request, Response, TransportListener}, id::Id, storage::Storage, search::{BasicSearch, BasicSearchOptions}};
 
 
 // TODO: push syncronization down the line to improve async performance
-pub struct KademliaDht<T: Transport> {
+pub struct KademliaDht<T: TransportSender> {
     // Immutable data
     config: SystemConfig,
     id: Id,
@@ -16,7 +16,7 @@ pub struct KademliaDht<T: Transport> {
     pub storage: RwLock<Storage>,
 }
 
-impl<T: Transport> KademliaDht<T> {
+impl<T: TransportSender> KademliaDht<T> {
     pub fn new(config: SystemConfig, id: Id, transport: T) -> Self {
         Self {
             config: config.clone(),
@@ -43,20 +43,38 @@ impl<T: Transport> KademliaDht<T> {
         self.storage.write().unwrap().periodic_run();
     }
 
-    pub fn on_connect(&self, id: &Id) {
+    pub async fn query_value(self: Arc<Self>, _key: Id) -> Option<Vec<u8>> {
+        todo!()
+    }
+
+    pub async fn query_nodes(&self, key: Id, options: BasicSearchOptions) -> Vec<Id> {
+        let bucket = self.tree.lock().unwrap()
+            .get_closer_n(&key, self.config.routing.bucket_size)
+            .iter()
+            .cloned()
+            .cloned()
+            .collect();
+        let searcher = BasicSearch::create(self, options, key);
+        searcher.search(bucket).await
+    }
+}
+
+
+impl<T: TransportSender> TransportListener for KademliaDht<T> {
+    fn on_connect(&self, id: &Id) -> bool {
         info!("{:?}: Connnected {:?}", self.id, id);
         self.tree.lock()
             .unwrap()
-            .insert(id.clone(), &self.transport);
+            .insert(id.clone(), &self.transport)
     }
 
-    pub fn on_disconnect(&self, id: &Id) {
+    fn on_disconnect(&self, id: &Id) {
         self.tree.lock()
             .unwrap()
             .remove(id);
     }
 
-    pub fn on_request(&self, sender: &Id, message: Request) -> Response {
+    fn on_request(&self, sender: &Id, message: Request) -> Response {
         debug!("{:?} Request from {:?}: {:?}", self.id(), sender, message);
         let mut tree = self.tree.lock().unwrap();
         tree.refresh(sender);
@@ -105,20 +123,5 @@ impl<T: Transport> KademliaDht<T> {
                 }
             }
         }
-    }
-
-    pub async fn query_value(self: Arc<Self>, _key: Id) -> Option<Vec<u8>> {
-        todo!()
-    }
-
-    pub async fn query_nodes(&self, key: Id, options: BasicSearchOptions) -> Vec<Id> {
-        let bucket = self.tree.lock().unwrap()
-            .get_closer_n(&key, self.config.routing.bucket_size)
-            .iter()
-            .cloned()
-            .cloned()
-            .collect();
-        let searcher = BasicSearch::create(self, options, key);
-        searcher.search(bucket).await
     }
 }

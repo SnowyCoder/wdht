@@ -4,7 +4,7 @@ use futures::stream::FuturesUnordered;
 use futures::prelude::*;
 use log::{warn, debug};
 
-use crate::{contacter::{Transport, Response, TransportError, Request}, Id, KademliaDht};
+use crate::{transport::{TransportSender, Response, TransportError, Request}, Id, KademliaDht};
 
 #[derive(Clone, Debug)]
 pub struct BasicSearchOptions {
@@ -23,7 +23,7 @@ pub struct BasicSearchOptions {
 /// 4. If all of the nodes in the closest window have been queried then there
 ///    are no closer nodes, finish the search.
 ///
-pub struct BasicSearch<'a, T: Transport> {
+pub struct BasicSearch<'a, T: TransportSender> {
     dht: &'a KademliaDht<T>,
     options: BasicSearchOptions,
     target_id: Id,
@@ -36,7 +36,7 @@ enum QueryState {
     Queried,
 }
 
-impl<'a, T: Transport> BasicSearch<'a, T> {
+impl<'a, T: TransportSender> BasicSearch<'a, T> {
     pub fn create(dht: &'a KademliaDht<T>, options: BasicSearchOptions, target_id: Id) -> Self {
         Self {
             dht,

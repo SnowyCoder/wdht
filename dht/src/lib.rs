@@ -3,10 +3,10 @@
 
 
 pub mod config;
-mod search;
-mod simulate;
-mod consts;
-mod contacter;
+pub mod search;
+pub mod simulate;
+pub mod consts;
+pub mod transport;
 mod storage;
 mod dht;
 mod id;

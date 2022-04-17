@@ -1,13 +1,13 @@
-use std::future::Future;
+use std::{future::Future, sync::Arc, ops::Deref};
 
-use futures::Stream;
 use thiserror::Error;
 
 use crate::id::Id;
 
+/// Object able to send messages to an id
 // Should use some sort of interior mutability and Refcounting
 // You must be able to send a Transport copy between boundaries! (Send)
-pub trait Transport : Clone + Send {
+pub trait TransportSender : Clone + Send {
     // some protocol have implicit keepalive pings,
     // let them handle it properly
     fn ping(&self, id: &Id);
@@ -19,8 +19,28 @@ pub trait Transport : Clone + Send {
     fn send(&self, id: &Id, msg: Request) -> Self::Fut;
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RequestId(pub u32);
+pub trait TransportListener {
+    /// Returns true only if the id is used in the routing protocol
+    fn on_connect(&self, id: &Id) -> bool;
+
+    fn on_disconnect(&self, id: &Id);
+
+    fn on_request(&self, sender: &Id, request: Request) -> Response;
+}
+
+impl<T: TransportListener> TransportListener for Arc<T> {
+    fn on_connect(&self, id: &Id) -> bool {
+        self.deref().on_connect(id)
+    }
+
+    fn on_disconnect(&self, id: &Id) {
+        self.deref().on_disconnect(id)
+    }
+
+    fn on_request(&self, sender: &Id, request: Request) -> Response {
+        self.deref().on_request(sender, request)
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Request {

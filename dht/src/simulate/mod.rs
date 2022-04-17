@@ -1,10 +1,10 @@
-use std::{sync::{Arc, Mutex}, collections::{HashMap, HashSet}, fmt::{Write, Display, self}};
+use std::{sync::{Arc, Mutex}, collections::{HashMap, HashSet}, fmt::Write};
 
 use futures::Future;
 use log::{debug, trace};
 use tokio::sync::{mpsc, oneshot, broadcast, Barrier};
 
-use crate::{contacter::{Transport, Response, Request, TransportError}, Id, KademliaDht, config::SystemConfig};
+use crate::{transport::{TransportSender, Response, Request, TransportError, TransportListener}, Id, KademliaDht, config::SystemConfig};
 
 
 #[derive(Debug)]
@@ -45,34 +45,44 @@ enum TransportMessage {
 //      A connection can be used for: routing or searching
 //      A routing connection is never deallocated unless it's lost
 //      Just needs to manage searching connections? (how??)
+pub struct AsyncSimulatedTransport;
 
-pub struct Actor {
-    dht: Arc<KademliaDht<SimulatedTransport>>,
-    mailbox: mpsc::Receiver<TransportMessage>,
-    shutdown: broadcast::Receiver<()>,
-}
-
-impl Actor {
-    pub fn spawn(shutdown: broadcast::Receiver<()>, id: Id, config: SystemConfig) -> Arc<KademliaDht<SimulatedTransport>> {
+impl AsyncSimulatedTransport {
+    pub fn create(id: Id, shutdown: broadcast::Receiver<()>) -> (Sender, Receiver) {
+        // Mailbox
         let (tx, rx) = mpsc::channel(128);
-        let transport = SimulatedTransport {
+
+        let sender = Sender {
             id: id.clone(),
             data: Arc::new(Mutex::new(TransportData {
                 contacts: HashMap::new(),
             })),
-            actor: tx,
+            receiver: tx,
         };
-        let dht = Arc::new(KademliaDht::new(config, id, transport));
-        let actor = Self {
-            dht: dht.clone(),
+        let receiver = Receiver {
+            sender: sender.clone(),
             mailbox: rx,
             shutdown,
         };
-        tokio::spawn(actor.run());
-        dht
+        (sender, receiver)
     }
 
-    async fn run(mut self) {
+    pub fn spawn(config: SystemConfig, id: Id, shutdown: broadcast::Receiver<()>) -> Arc<KademliaDht<Sender>> {
+        let (sender, receiver) = Self::create(id.clone(), shutdown);
+        let kad = Arc::new(KademliaDht::new(config, id, sender));
+        tokio::spawn(receiver.run(kad.clone()));
+        kad
+    }
+}
+
+pub struct Receiver {
+    sender: Sender,
+    mailbox: mpsc::Receiver<TransportMessage>,
+    shutdown: broadcast::Receiver<()>,
+}
+
+impl Receiver {
+    async fn run<L: TransportListener>(mut self, listener: L) {
         loop {
             let mail = tokio::select! {
                 x = self.mailbox.recv() => x,
@@ -86,16 +96,16 @@ impl Actor {
             use TransportMessage::*;
             match mail {
                 Hello { id, mex } => {
-                    self.dht.on_connect(&id);
-                    self.dht.transport.data.lock().unwrap().contacts.insert(id, mex);
+                    listener.on_connect(&id);
+                    self.sender.data.lock().unwrap().contacts.insert(id, mex);
                 }
                 Request { id, msg, res: wait } => {
-                    let res = self.dht.on_request(&id, msg);
+                    let res = listener.on_request(&id, msg);
                     let contacts = match &res {
                         Response::FoundNodes(ids) => {
                             // We're sending node ids, also send contact data!
                             // (in a WebRTC-like implementation this would be a tad more complex)
-                            let routes = self.dht.transport.data.lock().unwrap();
+                            let routes = self.sender.data.lock().unwrap();
                             ids.iter()
                                 .map(|x| routes.contacts.get(x).unwrap().clone())
                                 .collect()
@@ -111,7 +121,7 @@ impl Actor {
                 ConnectTo { ids, res } => {
                     for (id, mailbox) in ids.iter() {
                         {
-                            let mut transport = self.dht.transport.data.lock().unwrap();
+                            let mut transport = self.sender.data.lock().unwrap();
                             if transport.contacts.contains_key(id) {
                                 // Prevent double-join (possible when two connections discover)
                                 // the same address concurrently.
@@ -121,12 +131,12 @@ impl Actor {
                                 .insert(id.clone(), mailbox.clone());
                         }
 
-                        self.dht.on_connect(id);
+                        listener.on_connect(id);
                         mailbox
                             .send(TransportMessage::Hello {
-                                id: self.dht.id().clone(),
+                                id: self.sender.id.clone(),
                                 // Own mailbox
-                                mex: self.dht.transport.actor.clone(),
+                                mex: self.sender.receiver.clone(),
                             })
                             .await
                             .expect("Failed to send hello");
@@ -146,13 +156,13 @@ struct TransportData {
 }
 
 #[derive(Clone)]
-pub struct SimulatedTransport {
+pub struct Sender {
     id: Id,
     data: Arc<Mutex<TransportData>>,
-    actor: mpsc::Sender<TransportMessage>,
+    receiver: mpsc::Sender<TransportMessage>,
 }
 
-impl SimulatedTransport {
+impl Sender {
     async fn send_req(self, id: Id, msg: Request) -> Result<Response, TransportError> {
         trace!("send_req({:?} to {:?}, {:?}", self.id, id, msg);
         let sender = {
@@ -187,7 +197,7 @@ impl SimulatedTransport {
             };
             if ids.len() > 0 {
                 let (tx, rx) = oneshot::channel();
-                self.actor.send(TransportMessage::ConnectTo {
+                self.receiver.send(TransportMessage::ConnectTo {
                     ids,
                     res: tx,
                 }).await.unwrap();
@@ -197,13 +207,13 @@ impl SimulatedTransport {
         Ok(payload)
     }
 
-    pub async fn connect_to(&self, ids: Vec<(&Id, &KademliaDht<SimulatedTransport>)>) {
+    pub async fn connect_to(&self, ids: Vec<(&Id, &Sender)>) {
         let (tx, rx) = oneshot::channel();
 
         let ids = ids.iter()
-            .map(|(id, dht)| ((*id).clone(), dht.transport().actor.clone()))
+            .map(|(id, sender)| ((*id).clone(), sender.receiver.clone()))
             .collect();
-        self.actor.send(TransportMessage::ConnectTo {
+        self.receiver.send(TransportMessage::ConnectTo {
             ids,
             res: tx,
         }).await.unwrap();
@@ -211,11 +221,11 @@ impl SimulatedTransport {
     }
 
     pub async fn barrier_sync(&self, barrier: Arc<Barrier>) {
-        self.actor.send(TransportMessage::Barrier(barrier)).await.unwrap();
+        self.receiver.send(TransportMessage::Barrier(barrier)).await.unwrap();
     }
 }
 
-impl Transport for SimulatedTransport {
+impl TransportSender for Sender {
     fn ping(&self, _id: &Id) {
         // Yes, we don't simulate node failure yet
     }
@@ -231,7 +241,7 @@ pub trait IntoDot {
     fn to_dot_string(self) -> String;
 }
 
-impl<'a, T> IntoDot for T where T: Iterator<Item = &'a SimulatedTransport> {
+impl<'a, T> IntoDot for T where T: Iterator<Item = &'a Sender> {
     fn to_dot_string(mut self) -> String {
         let mut res = String::new();
         let mut visited = HashSet::new();
@@ -279,14 +289,14 @@ mod tests {
 
         // Create 2 DHTs (a and b)
         let aid = Id::from_hex("aa");
-        let a = Actor::spawn(killswitch.subscribe(), aid.clone(), config.clone());
+        let a = AsyncSimulatedTransport::spawn(config.clone(), aid.clone(), killswitch.subscribe());
 
         let bid = Id::from_hex("ba");
 
-        let b = Actor::spawn(shutdown, bid.clone(), config);
+        let b = AsyncSimulatedTransport::spawn(config, bid.clone(), shutdown);
 
         // Connect b to a (and vice-versa)
-        b.transport().connect_to(vec![(&aid, &a)]).await;
+        b.transport().connect_to(vec![(&aid, &a.transport)]).await;
 
         // Barrier: allow processing of joins
         let barr = Arc::new(Barrier::new(3));
@@ -337,13 +347,13 @@ mod tests {
 
         let dhts = ids.iter()
             .cloned()
-            .map(|id| Actor::spawn(killswitch.subscribe(), id, config.clone()))
+            .map(|id| AsyncSimulatedTransport::spawn(config.clone(), id, killswitch.subscribe()))
             .collect::<Vec<_>>();
 
         // "aaaaaaaa" is the rendevouz DHT (a.k.a. bootstrap dht)
         for i in 1..ids.len() {
             info!("----- NODE {:?} ----", ids[i]);
-            dhts[i].transport().connect_to(vec![(&ids[0], &dhts[0])]).await;
+            dhts[i].transport().connect_to(vec![(&ids[0], &dhts[0].transport)]).await;
             // Bootstrap
             dhts[i].query_nodes(ids[i].clone(), search_options.clone()).await;
         }

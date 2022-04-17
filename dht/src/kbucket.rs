@@ -1,4 +1,4 @@
-use crate::{id::Id, contacter::Transport, config::RoutingConfig};
+use crate::{id::Id, transport::TransportSender, config::RoutingConfig};
 
 
 #[derive(Debug, Default)]
@@ -28,7 +28,7 @@ impl KBucket {
                 .any(|x| *x == *id)
     }
 
-    pub fn insert<T: Transport>(&mut self, id: Id, config: &RoutingConfig, contacter: &T) -> bool {
+    pub fn insert<T: TransportSender>(&mut self, id: Id, config: &RoutingConfig, contacter: &T) -> bool {
         if self.has(&id) {
             return false;
         }

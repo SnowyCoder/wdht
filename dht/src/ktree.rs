@@ -1,4 +1,4 @@
-use crate::{config::RoutingConfig, consts::ID_LEN_BITS, kbucket::KBucket, id::Id, contacter::Transport};
+use crate::{config::RoutingConfig, consts::ID_LEN_BITS, kbucket::KBucket, id::Id, transport::TransportSender};
 
 
 pub struct KTreeEntry {
@@ -61,7 +61,7 @@ impl KTree {
         return self.get_bucket(id).has(id);
     }
 
-    pub fn insert<T: Transport>(&mut self, id: Id, contacter: &T) -> bool {
+    pub fn insert<T: TransportSender>(&mut self, id: Id, contacter: &T) -> bool {
         if id == self.id {
             return false;
         }
@@ -214,7 +214,7 @@ impl<'a> NodeAggregator<'a> {
 mod tests {
     use std::{collections::HashMap, future, sync::{Arc, Mutex, MutexGuard}};
 
-    use crate::{consts::ID_LEN, contacter::{Response, TransportError}};
+    use crate::{consts::ID_LEN, transport::{Response, TransportError}};
 
     use super::*;
 
@@ -232,14 +232,13 @@ mod tests {
     #[derive(Clone)]
     struct IgnoreContacter;
 
-    impl Transport for IgnoreContacter {
+    impl TransportSender for IgnoreContacter {
         fn ping(&self, _id: &Id) {}
 
-        fn send(&self, _id: &Id, _msg: crate::contacter::Request) -> Self::Fut {
+        type Fut = future::Ready<Result<Response, TransportError>>;
+        fn send(&self, _id: &Id, _msg: crate::transport::Request) -> Self::Fut {
             panic!();
         }
-
-        type Fut = future::Ready<Result<Response, TransportError>>;
     }
 
     #[test]
@@ -315,18 +314,17 @@ mod tests {
         }
     }
 
-    impl Transport for MapContacter {
+    impl TransportSender for MapContacter {
         fn ping(&self, id: &Id) {
             *self.inner()
                 .entry(id.clone())
                 .or_insert(0) += 1;
         }
 
-        fn send(&self, _id: &Id, _msg: crate::contacter::Request) -> Self::Fut {
+        type Fut = future::Ready<Result<Response, TransportError>>;
+        fn send(&self, _id: &Id, _msg: crate::transport::Request) -> Self::Fut {
             panic!();
         }
-
-        type Fut = future::Ready<Result<Response, TransportError>>;
     }
 
     #[test]
