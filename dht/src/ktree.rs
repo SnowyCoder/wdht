@@ -34,14 +34,15 @@ impl KTree {
 
     fn get_bucket_index(&self, id: &Id) -> (usize, usize) {
         let nid = self.id.xor(id);
-        let entryi = nid.leading_zeros();
-        if entryi == ID_LEN_BITS as u8 {
-            panic!("Cannot add machine id");
-        }
+        let entryi = nid.leading_zeros()
+            .min((ID_LEN_BITS - self.config.buckets_per_bit) as u8);
         let bucketi = if self.config.buckets_per_bit == 1 {
             0// fast path (please compiler optimize it away)
         } else {
-            nid.bitslice(entryi as u32, self.config.buckets_per_bit as u8) as usize
+            nid.bitslice(
+                entryi as u32 + 1,
+                self.config.buckets_per_bit as u8 - 1
+            ) as usize
         };
         return (entryi as usize, bucketi);
     }
@@ -61,8 +62,13 @@ impl KTree {
     }
 
     pub fn insert<T: Transport>(&mut self, id: Id, contacter: &T) -> bool {
+        if id == self.id {
+            return false;
+        }
         let index = self.get_bucket_index(&id);
-        self.nodes[index.0].buckets[index.1].insert(id, &self.config, contacter)
+        self.nodes[index.0]
+            .buckets[index.1]
+            .insert(id, &self.config, contacter)
     }
 
     pub fn remove(&mut self, id: &Id) {
@@ -369,5 +375,38 @@ mod tests {
             (Id::from_hex("a0000101"), 1),
             (Id::from_hex("a0000110"), 1),// promoted from cache and contacted
         ]));
+    }
+
+    #[test]
+    fn multi_buckets_per_bit() {
+        let id = Id::from_hex("a0000000");
+        let config = RoutingConfig {
+            bucket_size: 2,
+            bucket_replacement_size: 1,
+            buckets_per_bit: 2,
+            ..Default::default()
+        };
+        let mut tree = KTree::new(id, config);
+
+        // Add similar entries to the same bucket,
+        // since the bucket size is 2 it will overflow
+        let contacter = &mut IgnoreContacter;
+        assert_eq!(tree.insert(Id::from_hex("b0000001"), contacter), true);
+        assert_eq!(tree.insert(Id::from_hex("b0000010"), contacter), true);
+        assert_eq!(tree.insert(Id::from_hex("b0000011"), contacter), true);// cache
+        assert_eq!(tree.insert(Id::from_hex("b0000100"), contacter), false);
+        // Add similar entries but with a different prefix
+        //     bits _ xor a
+        // a = 1010  0000
+        // c = 1100  0110  (prefix: 10...)
+        // e = 1110  0100  (prefix: 00...)
+        // So c and e are at the same distance from a, but they have a different bit
+        // they'll since be placed in different buckets
+        assert_eq!(tree.insert(Id::from_hex("c0000001"), contacter), true);
+        assert_eq!(tree.insert(Id::from_hex("c0000010"), contacter), true);
+        assert_eq!(tree.insert(Id::from_hex("e0000001"), contacter), true);
+        assert_eq!(tree.insert(Id::from_hex("e0000010"), contacter), true);
+        assert_eq!(tree.insert(Id::from_hex("e0000011"), contacter), true);// cache
+        assert_eq!(tree.insert(Id::from_hex("e0000100"), contacter), false);// full
     }
 }

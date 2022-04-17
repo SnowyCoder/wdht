@@ -13,7 +13,16 @@ pub struct BasicSearchOptions {
     pub parallelism: u32,
 }
 
-
+/// Basic search, taken from the Kademlia original paper
+/// Works by keeping a bucket-size window of the closest node to the target id.
+/// When a new node is discovered it's inserted ONLY IF it's in the k-closest ids.
+/// Of these nodes only alpha are queried at a time, alpha is called the parallelism parameter.
+/// 1. Search in the current node for the k closest nodes to target_id
+/// 2. Search in alpha of the nodes in the window (not queried yet)
+/// 3. If a node returns other nodes, try to put them in the window
+/// 4. If all of the nodes in the closest window have been queried then there
+///    are no closer nodes, finish the search.
+///
 pub struct BasicSearch<'a, T: Transport> {
     dht: &'a KademliaDht<T>,
     options: BasicSearchOptions,
@@ -67,6 +76,8 @@ impl<'a, T: Transport> BasicSearch<'a, T> {
         let parallelism = self.options.parallelism;
 
         let mut queried: HashSet<Id> = first_bucket.iter().cloned().collect();
+        queried.insert(self.dht.id().clone());// We already queried ourself
+        log::debug!("First bucket: {:?}", first_bucket);
 
         // Must always be of bucket length, similar to a window of the closest Ids that we know
         let mut to_query: Vec<(QueryState, Id)> = first_bucket.into_iter()
@@ -124,7 +135,7 @@ impl<'a, T: Transport> BasicSearch<'a, T> {
 
             if to_query.iter().all(|x| x.0 == QueryState::Queried) {
                 // All of the closest nodes responded, other queried nodes should not know any
-                // other closer node (if they know)
+                // other closer node
                 break;
             }
         }

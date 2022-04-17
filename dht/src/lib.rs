@@ -1,6 +1,10 @@
+#![feature(type_alias_impl_trait)]
+#![forbid(unsafe_code)]
+
 
 pub mod config;
 mod search;
+mod simulate;
 mod consts;
 mod contacter;
 mod storage;
@@ -11,19 +15,3 @@ mod ktree;
 
 pub use dht::KademliaDht;
 pub use id::Id;
-
-pub fn add(a: u32, b: u32) -> u32 {
-    a + b
-}
-
-
-#[cfg(test)]
-mod tests {
-    use crate::add;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}

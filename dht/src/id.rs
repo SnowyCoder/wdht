@@ -46,11 +46,17 @@ impl Id {
             (res << secondlen) | ((byte2 & !(255 >> byte2l)) >> (8 - secondlen))
         }
     }
+
+    pub fn as_short_hex(&self) -> String {
+        let hex_id = hex::encode(&self.0);
+        hex_id.trim_start_matches('0').to_owned()
+    }
 }
 
 impl Debug for Id {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("Id").field(&hex::encode(&self.0)).finish()
+        let short_id = self.as_short_hex();
+        f.debug_tuple("Id").field(&short_id).finish()
     }
 }
 

@@ -1,0 +1,4 @@
+[toolchain]
+# Until https://github.com/rust-lang/rust/issues/63063
+# (seems to be near stabilization)
+channel = "nightly-2022-04-15"

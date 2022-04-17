@@ -1,19 +1,10 @@
 use std::num::NonZeroU64;
 
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct SystemConfig {
     pub routing: RoutingConfig,
     pub storage: StorageConfig,
-}
-
-impl Default for SystemConfig {
-    fn default() -> Self {
-        Self {
-            routing: Default::default(),
-            storage: Default::default(),
-        }
-    }
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]

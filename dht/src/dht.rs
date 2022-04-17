@@ -1,6 +1,6 @@
 use std::sync::{RwLock, Mutex, Arc};
 
-use log::{error, debug};
+use log::{error, debug, info};
 
 use crate::{ktree::KTree, config::SystemConfig, contacter::{Transport, Request, Response}, id::Id, storage::Storage, search::{BasicSearch, BasicSearchOptions}};
 
@@ -44,6 +44,7 @@ impl<T: Transport> KademliaDht<T> {
     }
 
     pub fn on_connect(&self, id: &Id) {
+        info!("{:?}: Connnected {:?}", self.id, id);
         self.tree.lock()
             .unwrap()
             .insert(id.clone(), &self.transport);
@@ -56,7 +57,7 @@ impl<T: Transport> KademliaDht<T> {
     }
 
     pub fn on_request(&self, sender: &Id, message: Request) -> Response {
-        debug!("Request from {:?}: {:?}", sender, message);
+        debug!("{:?} Request from {:?}: {:?}", self.id(), sender, message);
         let mut tree = self.tree.lock().unwrap();
         tree.refresh(sender);
 
@@ -64,11 +65,13 @@ impl<T: Transport> KademliaDht<T> {
             Request::FindNodes(x) => {
                 // TODO: how many nodes to search?
                 let found = tree.get_closer_n(&x, self.config.routing.bucket_size);
+                let found = found.into_iter()
+                    .filter(|x| *x != sender)
+                    .map(|x| (*x).clone())
+                    .collect();
 
-                debug!("Find closer {:?}: {:?}", x, found);
-                Response::FoundNodes(
-                    found.iter().map(|x| (*x).clone()).collect()
-                )
+                debug!("| Find closer {:?}: {:?}", x, found);
+                Response::FoundNodes(found)
             }
 
             Request::FindData(x) => {

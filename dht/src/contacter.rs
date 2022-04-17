@@ -1,5 +1,6 @@
 use std::future::Future;
 
+use futures::Stream;
 use thiserror::Error;
 
 use crate::id::Id;
@@ -14,7 +15,7 @@ pub trait Transport : Clone + Send {
     // TODO:
     // we could also use some actix-like traits to restrict down the possible answers?
     // other option: use some lower-level API (to gain performance)
-    type Fut: Future<Output=Result<Response, TransportError>>;
+    type Fut: Future<Output=Result<Response, TransportError>> + Send;
     fn send(&self, id: &Id, msg: Request) -> Self::Fut;
 }
 
