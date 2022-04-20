@@ -82,7 +82,7 @@ pub struct Receiver {
 }
 
 impl Receiver {
-    async fn run<L: TransportListener>(mut self, listener: L) {
+    async fn run<L: TransportListener, R: AsRef<L>>(mut self, listener: R) {
         loop {
             let mail = tokio::select! {
                 x = self.mailbox.recv() => x,
@@ -96,11 +96,11 @@ impl Receiver {
             use TransportMessage::*;
             match mail {
                 Hello { id, mex } => {
-                    listener.on_connect(&id);
+                    listener.as_ref().on_connect(&id);
                     self.sender.data.lock().unwrap().contacts.insert(id, mex);
                 }
                 Request { id, msg, res: wait } => {
-                    let res = listener.on_request(&id, msg);
+                    let res = listener.as_ref().on_request(&id, msg);
                     let contacts = match &res {
                         Response::FoundNodes(ids) => {
                             // We're sending node ids, also send contact data!
@@ -131,7 +131,7 @@ impl Receiver {
                                 .insert(id.clone(), mailbox.clone());
                         }
 
-                        listener.on_connect(id);
+                        listener.as_ref().on_connect(id);
                         mailbox
                             .send(TransportMessage::Hello {
                                 id: self.sender.id.clone(),

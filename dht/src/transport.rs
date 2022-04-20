@@ -1,4 +1,4 @@
-use std::{future::Future, sync::Arc, ops::Deref};
+use std::future::Future;
 
 use thiserror::Error;
 
@@ -26,20 +26,6 @@ pub trait TransportListener {
     fn on_disconnect(&self, id: &Id);
 
     fn on_request(&self, sender: &Id, request: Request) -> Response;
-}
-
-impl<T: TransportListener> TransportListener for Arc<T> {
-    fn on_connect(&self, id: &Id) -> bool {
-        self.deref().on_connect(id)
-    }
-
-    fn on_disconnect(&self, id: &Id) {
-        self.deref().on_disconnect(id)
-    }
-
-    fn on_request(&self, sender: &Id, request: Request) -> Response {
-        self.deref().on_request(sender, request)
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
