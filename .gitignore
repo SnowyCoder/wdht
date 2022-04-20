@@ -3,3 +3,4 @@ bin/
 pkg/
 /target/
 **/wasm-pack.log
+Cargo.lock
