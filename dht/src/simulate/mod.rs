@@ -14,6 +14,11 @@ struct TransportResponse {
     contacts: Vec<mpsc::Sender<TransportMessage>>,
 }
 
+#[derive(Clone, Debug)]
+pub struct IntrospectionData {
+    pub connection_count: usize,
+}
+
 #[derive(Debug)]
 enum TransportMessage {
     Hello {
@@ -96,8 +101,9 @@ impl Receiver {
             use TransportMessage::*;
             match mail {
                 Hello { id, mex } => {
-                    listener.as_ref().on_connect(&id);
-                    self.sender.data.lock().unwrap().contacts.insert(id, mex);
+                    if listener.as_ref().on_connect(&id) {
+                        self.sender.data.lock().unwrap().contacts.insert(id, mex);
+                    }
                 }
                 Request { id, msg, res: wait } => {
                     let res = listener.as_ref().on_request(&id, msg);
@@ -116,7 +122,8 @@ impl Receiver {
                         payload: res,
                         contacts,
                     };
-                    wait.send(res).expect("Cannot send response back");
+                    // Ignore error, if the other half ignores the response we don't care
+                    let _ = wait.send(res);
                 }
                 ConnectTo { ids, res } => {
                     for (id, mailbox) in ids.iter() {
@@ -127,11 +134,15 @@ impl Receiver {
                                 // the same address concurrently.
                                 continue;
                             }
-                            transport.contacts
-                                .insert(id.clone(), mailbox.clone());
-                        }
 
-                        listener.as_ref().on_connect(id);
+                            if listener.as_ref().on_connect(id) {
+                                transport.contacts
+                                    .insert(id.clone(), mailbox.clone());
+                            } else {
+                                // Connection is not used in routing, so might even forget it
+                            }
+
+                        }
                         mailbox
                             .send(TransportMessage::Hello {
                                 id: self.sender.id.clone(),
@@ -141,7 +152,7 @@ impl Receiver {
                             .await
                             .expect("Failed to send hello");
                     }
-                    res.send(()).unwrap();
+                    let _ = res.send(());
                 }
                 Barrier(b) => {
                     b.wait().await;
@@ -223,6 +234,13 @@ impl Sender {
     pub async fn barrier_sync(&self, barrier: Arc<Barrier>) {
         self.receiver.send(TransportMessage::Barrier(barrier)).await.unwrap();
     }
+
+    pub fn introspect(&self) -> IntrospectionData {
+        let data = self.data.lock().unwrap();
+        IntrospectionData {
+            connection_count: data.contacts.len(),
+        }
+    }
 }
 
 impl TransportSender for Sender {
@@ -268,6 +286,7 @@ impl<'a, T> IntoDot for T where T: Iterator<Item = &'a Sender> {
 #[cfg(test)]
 mod tests {
     use log::info;
+    use rand::{prelude::StdRng, SeedableRng, Rng};
 
     use crate::search::BasicSearchOptions;
 
@@ -358,6 +377,8 @@ mod tests {
             dhts[i].query_nodes(ids[i].clone(), search_options.clone()).await;
         }
 
+        // Everyone is bootstrapped
+
         // Uncomment to write dot graph file (for visualization)
         /*File::create("sim10.dot").unwrap().write_all(
             dhts.iter()
@@ -365,6 +386,53 @@ mod tests {
                 .to_dot_string()
                 .as_bytes()
         ).unwrap();*/
+
+        killswitch.send(()).unwrap();
+    }
+
+    /// Very expensive test that simulates 200k nodes
+    /// takes around 4.2GiB and (in my crappy laptop) takes ~35s
+    #[tokio::test]
+    #[ignore]// Intensive test
+    async fn simulate_200k() {
+        init();
+        let mut rng = StdRng::seed_from_u64(0x123456789abcdef0);
+
+        let (killswitch, _shutdown) = broadcast::channel(1);
+
+        let config: SystemConfig = Default::default();
+        let search_options = BasicSearchOptions {
+            parallelism: 2,
+        };
+
+        let n_max = 200_000usize;
+        let ids: Vec<Id> = (0..n_max)
+            .map(|_| rng.gen())
+            .collect();
+
+        let dhts = ids.iter()
+            .cloned()
+            .map(|id| AsyncSimulatedTransport::spawn(config.clone(), id, killswitch.subscribe()))
+            .collect::<Vec<_>>();
+
+        // the first node is the rendevouz DHT (a.k.a. bootstrap dht)
+        for i in 1..ids.len() {
+            //info!("----- NODE {:?} ----", ids[i]);
+            dhts[i].transport().connect_to(vec![(&ids[0], &dhts[0].transport)]).await;
+            // Bootstrap
+            dhts[i].query_nodes(ids[i].clone(), search_options.clone()).await;
+        }
+
+        let (min, max, avg) = dhts.iter()
+            .map(|x| x.transport().introspect().connection_count)
+            .fold((std::usize::MAX, 0usize, 0usize), |a, b| {
+                (a.0.min(b), a.1.max(b), a.2 + b)
+            });
+        let avg = avg as f32 / dhts.len() as f32;
+
+        eprintln!("Connections:\n\
+        min/max/avg\n\
+        {min}/{max}/{avg:.3}");
 
         killswitch.send(()).unwrap();
     }

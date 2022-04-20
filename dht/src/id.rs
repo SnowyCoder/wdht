@@ -1,6 +1,8 @@
 use std::fmt::Debug;
 
 use itertools::izip;
+#[cfg(feature = "rand")]
+use rand::{Rng, prelude::Distribution, distributions::Standard};
 
 use crate::consts::ID_LEN;
 
@@ -57,6 +59,17 @@ impl Debug for Id {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let short_id = self.as_short_hex();
         f.debug_tuple("Id").field(&short_id).finish()
+    }
+}
+
+#[cfg(feature = "rand")]
+impl Distribution<Id> for Standard {
+    fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> Id {
+        let mut id = [0u8; ID_LEN];
+        for i in &mut id {
+            *i = rng.gen();
+        }
+        Id(id)
     }
 }
 
