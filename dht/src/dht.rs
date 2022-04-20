@@ -1,8 +1,9 @@
-use std::sync::{RwLock, Mutex, Arc};
+use std::{sync::{RwLock, Mutex}, time::Duration};
 
-use log::{error, debug, info};
+use futures::{stream::FuturesUnordered, StreamExt};
+use log::{error, debug, info, warn};
 
-use crate::{ktree::KTree, config::SystemConfig, transport::{TransportSender, Request, Response, TransportListener}, id::Id, storage::Storage, search::{BasicSearch, BasicSearchOptions}};
+use crate::{ktree::KTree, config::SystemConfig, transport::{TransportSender, Request, Response, TransportListener}, id::Id, storage::Storage, search::{BasicSearch, BasicSearchOptions, SearchType, SearchResult}};
 
 
 // TODO: push syncronization down the line to improve async performance
@@ -43,19 +44,79 @@ impl<T: TransportSender> KademliaDht<T> {
         self.storage.write().unwrap().periodic_run();
     }
 
-    pub async fn query_value(self: Arc<Self>, _key: Id) -> Option<Vec<u8>> {
-        todo!()
-    }
-
-    pub async fn query_nodes(&self, key: Id, options: BasicSearchOptions) -> Vec<Id> {
-        let bucket = self.tree.lock().unwrap()
-            .get_closer_n(&key, self.config.routing.bucket_size)
+    fn get_closer_bucket(&self, key: &Id) -> Vec<Id> {
+        self.tree.lock().unwrap()
+            .get_closer_n(key, self.config.routing.bucket_size)
             .iter()
             .cloned()
             .cloned()
-            .collect();
-        let searcher = BasicSearch::create(self, options, key);
-        searcher.search(bucket).await
+            .collect()
+    }
+
+    pub async fn query_value(&self, key: Id, options: BasicSearchOptions) -> Option<Vec<u8>> {
+        {// Check if it's already in storage
+            let storage = self.storage.read().unwrap();
+            let data = storage.get(&key);
+            if let Some(data) = data {
+                return Some(data.clone());
+            }
+        }
+
+        let bucket = self.get_closer_bucket(&key);
+        let searcher = BasicSearch::create(self, options, SearchType::Data, key);
+        match searcher.search(bucket).await {
+            SearchResult::CloserNodes(_) => None,
+            SearchResult::DataFound(x) => Some(x),
+        }
+    }
+
+    pub async fn query_nodes(&self, key: Id, options: BasicSearchOptions) -> Vec<Id> {
+        let bucket = self.get_closer_bucket(&key);
+        let searcher = BasicSearch::create(self, options, SearchType::Nodes, key);
+        match searcher.search(bucket).await {
+            SearchResult::CloserNodes(x) => x,
+            SearchResult::DataFound(_) => unreachable!(),
+        }
+    }
+
+    pub async fn insert(&self, key: Id, lifetime: Duration, value: Vec<u8>) -> Result<usize, crate::storage::Error> {
+        // Insert key in the k closest nodes
+        let lifetime = lifetime.as_secs() as u32;
+
+        Storage::check_entry(&self.config.storage, &key, lifetime, &value)?;
+
+        info!("Inserting {key:?} into the network for {lifetime}s");
+
+        let search_options = BasicSearchOptions { parallelism: 4 };
+        let nodes = self.query_nodes(key.clone(), search_options).await;
+
+        let mut installation_count = 0;
+
+        if nodes.iter().any(|x| *x == self.id) {
+            self.storage.write().unwrap().insert(key.clone(), lifetime, value.clone()).unwrap();
+            installation_count += 1;
+        }
+
+        let request = Request::Insert(key, lifetime, value);
+
+        let mut answers = nodes.iter()
+            .filter(|x| **x != self.id)
+            .map(|x| async {
+                // tag the future (to know which clients started it)
+                (x.clone(), self.transport.send(x, request.clone()).await)
+            })
+            .collect::<FuturesUnordered<_>>();
+
+        while let Some((id, x)) = answers.next().await {
+            match x {
+                Ok(Response::Done) => installation_count += 1,
+                Ok(Response::Error) => warn!("{id:?} returned an error"),
+                Ok(_) => warn!("Unknown response received from {id:?}"),
+                Err(x) => warn!("Transport error querying {id:?}: {x}"),
+            }
+        }
+
+        Ok(installation_count)
     }
 }
 
@@ -114,7 +175,7 @@ impl<T: TransportSender> TransportListener for KademliaDht<T> {
                 // TODO: protection against SPAM attacks? (ex. merkle challenges?)
                 debug!("Inserting value {:?} {} {:x?}", file_id, lifetime, data);
                 let mut storage = self.storage.write().unwrap();
-                match storage.insert(&self.id, file_id, lifetime, data) {
+                match storage.insert(file_id, lifetime, data) {
                     Ok(_) => Response::Done,
                     Err(x) => {
                         error!("Error inserting value: {}", x);

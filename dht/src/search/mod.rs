@@ -1,4 +1,4 @@
-use std::{collections::HashSet, cmp::Reverse};
+use std::{collections::HashSet, cmp::Reverse, iter};
 
 use futures::stream::FuturesUnordered;
 use futures::prelude::*;
@@ -26,6 +26,7 @@ pub struct BasicSearchOptions {
 pub struct BasicSearch<'a, T: TransportSender> {
     dht: &'a KademliaDht<T>,
     options: BasicSearchOptions,
+    search_type: SearchType,
     target_id: Id,
 }
 
@@ -36,11 +37,23 @@ enum QueryState {
     Queried,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SearchType {
+    Nodes,
+    Data,
+}
+
+pub enum SearchResult {
+    CloserNodes(Vec<Id>),
+    DataFound(Vec<u8>),
+}
+
 impl<'a, T: TransportSender> BasicSearch<'a, T> {
-    pub fn create(dht: &'a KademliaDht<T>, options: BasicSearchOptions, target_id: Id) -> Self {
+    pub fn create(dht: &'a KademliaDht<T>, options: BasicSearchOptions, search_type: SearchType, target_id: Id) -> Self {
         Self {
             dht,
             options,
+            search_type,
             target_id,
         }
     }
@@ -61,7 +74,12 @@ impl<'a, T: TransportSender> BasicSearch<'a, T> {
         to.0 = QueryState::Querying;
         let used_id = to.1.clone();
 
-        let fut = self.dht.transport().send(&to.1, Request::FindNodes(self.target_id.clone()));
+        let message = match self.search_type {
+            SearchType::Nodes => Request::FindNodes(self.target_id.clone()),
+            SearchType::Data => Request::FindData(self.target_id.clone()),
+        };
+
+        let fut = self.dht.transport().send(&to.1, message);
         Some(fut.map(|x| (used_id, x)))
     }
 
@@ -71,7 +89,7 @@ impl<'a, T: TransportSender> BasicSearch<'a, T> {
         bucket.sort_by_key(|x| Reverse(x.1.xor(&self.target_id).leading_zeros()));
     }
 
-    pub async fn search(&self, first_bucket: Vec<Id>) -> Vec<Id> {
+    pub async fn search(&self, first_bucket: Vec<Id>) -> SearchResult {
         let bucket_size = self.dht.config().routing.bucket_size;
         let parallelism = self.options.parallelism;
 
@@ -82,6 +100,7 @@ impl<'a, T: TransportSender> BasicSearch<'a, T> {
         // Must always be of bucket length, similar to a window of the closest Ids that we know
         let mut to_query: Vec<(QueryState, Id)> = first_bucket.into_iter()
                 .map(|x| (QueryState::Waiting, x))
+                .chain(iter::once((QueryState::Queried, self.dht.id().clone())))
                 .collect();
         self.sort_bucket(&mut to_query);
 
@@ -128,7 +147,16 @@ impl<'a, T: TransportSender> BasicSearch<'a, T> {
                         available_futures -= 1;
                     }
                 },
-                Ok(FoundData(_)) => todo!(),// TODO: handle data retrieval
+                Ok(FoundData(x)) => {
+                    if self.search_type == SearchType::Data {
+                        // TODO: handle multiple datas?
+                        // If multiple data entries are available then we might need every response
+                        // (at least, we might need the full response of the closest bucket)
+                        return SearchResult::DataFound(x);
+                    } else {
+                        warn!("Node {:?} returned data even if only nodes are requested", id)
+                    }
+                },
                 Ok(Error) => warn!("Node {:?} returned error", id),
                 Ok(x) => warn!("Node {:?} returned invalid response: {:?}", id, x),
             }
@@ -139,8 +167,10 @@ impl<'a, T: TransportSender> BasicSearch<'a, T> {
                 break;
             }
         }
-        to_query.into_iter()
+
+        let nodes = to_query.into_iter()
             .map(|x| x.1)
-            .collect()
+            .collect();
+        SearchResult::CloserNodes(nodes)
     }
 }

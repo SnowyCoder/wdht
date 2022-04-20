@@ -140,6 +140,7 @@ impl Receiver {
                                     .insert(id.clone(), mailbox.clone());
                             } else {
                                 // Connection is not used in routing, so might even forget it
+                                // TODO: false, it might be still used for some querying, now it might panic!
                             }
 
                         }
@@ -285,8 +286,11 @@ impl<'a, T> IntoDot for T where T: Iterator<Item = &'a Sender> {
 
 #[cfg(test)]
 mod tests {
+    use std::{cmp::Reverse, time::Duration};
+
+    use itertools::Itertools;
     use log::info;
-    use rand::{prelude::StdRng, SeedableRng, Rng};
+    use rand::{prelude::{StdRng, SliceRandom}, SeedableRng, Rng};
 
     use crate::search::BasicSearchOptions;
 
@@ -330,7 +334,7 @@ mod tests {
         let res = a.query_nodes(bid.clone(), BasicSearchOptions {
             parallelism: 1,
         }).await;
-        assert_eq!(res, vec![bid.clone()]);
+        assert_eq!(res, vec![bid.clone(), aid.clone()]);
 
         // Shutdown everything
         killswitch.send(()).unwrap();
@@ -379,6 +383,31 @@ mod tests {
 
         // Everyone is bootstrapped
 
+        // Node-querying test
+        let target = Id::from_hex("123456ff");// Note: this node does not exist
+        let found = dhts[4].query_nodes(target.clone(), search_options.clone()).await;
+        // How can we check that node orderings are equivalent?
+        // We should check that the ordering has the best XOR distance from the target node
+        assert_eq!(
+            found
+                .iter()
+                .map(|x| x.xor(&target).leading_zeros())
+                .collect::<Vec<_>>(),
+            ids.iter()
+                .map(|x| x.xor(&target).leading_zeros())
+                .sorted_by_key(|x| Reverse(*x))
+                .take(config.routing.bucket_size)
+                .collect::<Vec<_>>()
+        );
+
+        // Insertion test
+        let data = vec![3u8, 1, 4, 1, 5];
+        let d = dhts[4].insert(target.clone(), Duration::from_secs(4), data.clone()).await.unwrap();
+        assert_eq!(d, config.routing.bucket_size);// There should be no insertion errors
+        let found = dhts[9].query_value(target, search_options.clone()).await;
+        // TODO: assert_matches... when it gets stabilized
+        assert_eq!(&found.unwrap(), &data);
+
         // Uncomment to write dot graph file (for visualization)
         /*File::create("sim10.dot").unwrap().write_all(
             dhts.iter()
@@ -391,7 +420,7 @@ mod tests {
     }
 
     /// Very expensive test that simulates 200k nodes
-    /// takes around 4.2GiB and (in my crappy laptop) takes ~35s
+    /// takes around 4.2GiB and (in my crappy laptop) ~35s
     #[tokio::test]
     #[ignore]// Intensive test
     async fn simulate_200k() {
@@ -433,6 +462,18 @@ mod tests {
         eprintln!("Connections:\n\
         min/max/avg\n\
         {min}/{max}/{avg:.3}");
+
+        // Insertion & retrieval test
+        for _ in 0..100 {
+            let target: Id = rng.gen();
+            let (pusher, receiver) = dhts.choose_multiple(&mut rng, 2).next_tuple().unwrap();
+            let data = rng.gen::<u128>().to_be_bytes().to_vec();
+
+            let received = pusher.insert(target.clone(), Duration::from_secs(1), data.clone()).await.unwrap();
+            assert_eq!(received, config.routing.bucket_size);
+            let found = receiver.query_value(target, search_options.clone()).await.unwrap();
+            assert_eq!(found, vec![]);
+        }
 
         killswitch.send(()).unwrap();
     }

@@ -1,5 +1,6 @@
 use std::{collections::{HashMap, BinaryHeap}, time::{Instant, Duration}};
 
+use log::info;
 use thiserror::Error;
 
 use crate::{id::Id, config::StorageConfig};
@@ -43,28 +44,37 @@ impl Storage {
     pub fn periodic_run(&mut self) {
         let now = Instant::now();
         // Remove old entries
-        while let Some((deadline, _id)) = self.deadlines.peek() {
+        while let Some((deadline, id)) = self.deadlines.peek() {
             if *deadline > now {
                 break;
             }
+
+            info!("Removing {id:?}");
 
             let id = self.deadlines.pop().unwrap().1;
             self.data.remove(&id);
         }
     }
 
-    pub fn insert(&mut self, _self_id: &Id, id: Id, lifetime: u32, data: Vec<u8>) -> Result<(), Error> {
+    pub fn check_entry(config: &StorageConfig, _id: &Id, lifetime: u32, data: &[u8]) -> Result<(), Error> {
+        if data.len() > config.max_size {
+            Err(Error::InvalidData)
+        } else if lifetime > config.max_lifetime {
+            Err(Error::InvalidLifetime)
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn insert(&mut self, id: Id, lifetime: u32, data: Vec<u8>) -> Result<(), Error> {
         // TODO: check distance?
+        Self::check_entry(&self.config, &id, lifetime, &data)?;
 
         if self.data.len() >= self.config.max_entries {
+            info!("Error inserting new value, too many entries");
             return Err(Error::TooManyEntries);
         }
-        if data.len() > self.config.max_size {
-            return Err(Error::InvalidData);
-        }
-        if lifetime > self.config.max_lifetime {
-            return Err(Error::InvalidLifetime);
-        }
+        info!("Inserting {id:?} for {lifetime}s");
 
         let deadline = Instant::now()
             .checked_add(Duration::from_secs(lifetime as u64));
