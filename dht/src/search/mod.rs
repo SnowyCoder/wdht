@@ -4,7 +4,7 @@ use futures::stream::FuturesUnordered;
 use futures::prelude::*;
 use log::{warn, debug};
 
-use crate::{transport::{TransportSender, Response, TransportError, Request}, Id, KademliaDht};
+use crate::{transport::{TransportSender, RawResponse, TransportError, Request, Contact}, Id, KademliaDht};
 
 #[derive(Clone, Debug)]
 pub struct BasicSearchOptions {
@@ -43,8 +43,8 @@ pub enum SearchType {
     Data,
 }
 
-pub enum SearchResult {
-    CloserNodes(Vec<Id>),
+pub enum SearchResult<C: Contact> {
+    CloserNodes(Vec<C>),
     DataFound(Vec<u8>),
 }
 
@@ -58,8 +58,8 @@ impl<'a, T: TransportSender> BasicSearch<'a, T> {
         }
     }
 
-    fn start_query(&self, queries: &mut [(QueryState, Id)])
-            -> Option<impl Future<Output=(Id, Result<Response, TransportError>)>> {
+    fn start_query(&self, queries: &mut [(QueryState, T::Contact)])
+            -> Option<impl Future<Output=(Id, Result<RawResponse<T::Contact>, TransportError>)>> {
         let to = queries.iter_mut()
             .filter(|x| x.0 == QueryState::Waiting)
             .next();
@@ -72,35 +72,36 @@ impl<'a, T: TransportSender> BasicSearch<'a, T> {
         };
 
         to.0 = QueryState::Querying;
-        let used_id = to.1.clone();
+        let used_id = to.1.id().clone();
 
         let message = match self.search_type {
             SearchType::Nodes => Request::FindNodes(self.target_id.clone()),
             SearchType::Data => Request::FindData(self.target_id.clone()),
         };
 
-        let fut = self.dht.transport().send(&to.1, message);
+        let fut = self.dht.transport().send(&used_id, message);
         Some(fut.map(|x| (used_id, x)))
     }
 
-    fn sort_bucket(&self, bucket: &mut [(QueryState, Id)]) {
+    fn sort_bucket(&self, bucket: &mut [(QueryState, T::Contact)]) {
         // Sort with leading zeros in descending order:
         // the first entries will have MORE leading zeros (so they'll be closer)
-        bucket.sort_by_key(|x| Reverse(x.1.xor(&self.target_id).leading_zeros()));
+        bucket.sort_by_key(|x| Reverse(x.1.id().xor(&self.target_id.id()).leading_zeros()));
     }
 
-    pub async fn search(&self, first_bucket: Vec<Id>) -> SearchResult {
+    pub async fn search(&self, first_bucket: Vec<T::Contact>) -> SearchResult<T::Contact> {
         let bucket_size = self.dht.config().routing.bucket_size;
         let parallelism = self.options.parallelism;
 
-        let mut queried: HashSet<Id> = first_bucket.iter().cloned().collect();
+        let mut queried: HashSet<Id> = first_bucket.iter().map(|x| x.id().clone()).collect();
         queried.insert(self.dht.id().clone());// We already queried ourself
-        log::debug!("First bucket: {:?}", first_bucket);
+        debug!("First bucket: {:?}", first_bucket);
 
+        let self_contact = self.dht.transport().wrap_contact(self.dht.id().clone());
         // Must always be of bucket length, similar to a window of the closest Ids that we know
-        let mut to_query: Vec<(QueryState, Id)> = first_bucket.into_iter()
+        let mut to_query: Vec<(QueryState, T::Contact)> = first_bucket.into_iter()
                 .map(|x| (QueryState::Waiting, x))
-                .chain(iter::once((QueryState::Queried, self.dht.id().clone())))
+                .chain(iter::once((QueryState::Queried, self_contact)))
                 .collect();
         self.sort_bucket(&mut to_query);
 
@@ -113,7 +114,7 @@ impl<'a, T: TransportSender> BasicSearch<'a, T> {
         tokio::pin!(pending);
         while let Some((id, res)) = pending.next().await {
             available_futures += 1;// 1 space available again
-            let entry = to_query.iter_mut().find(|x| x.1 == id);
+            let entry = to_query.iter_mut().find(|x| x.1.id() == &id);
 
             match entry {
                 Some(entry) => {
@@ -125,7 +126,8 @@ impl<'a, T: TransportSender> BasicSearch<'a, T> {
                     // efficient to check the answer for additional details
                 }
             }
-            use Response::*;
+            debug!("Response from {:?}: {:?}", id, res);
+            use RawResponse::*;
             match res {
                 Err(x) => {
                     debug!("Error requesting from {:?}: {}", id, x);
@@ -135,7 +137,7 @@ impl<'a, T: TransportSender> BasicSearch<'a, T> {
                     to_query.extend(nodes.iter()
                         .cloned()// Transform &Id to Id
                         // Only take non-previously queried nodes
-                        .filter(|x| queried.insert(x.clone()))
+                        .filter(|x| queried.insert(x.id().clone()))
                         .map(|x| (QueryState::Waiting, x)));
                     self.sort_bucket(&mut to_query);
                     to_query.truncate(bucket_size);

@@ -3,7 +3,7 @@ use std::{sync::{RwLock, Mutex}, time::Duration};
 use futures::{stream::FuturesUnordered, StreamExt};
 use log::{error, debug, info, warn};
 
-use crate::{ktree::KTree, config::SystemConfig, transport::{TransportSender, Request, Response, TransportListener}, id::Id, storage::Storage, search::{BasicSearch, BasicSearchOptions, SearchType, SearchResult}};
+use crate::{ktree::KTree, config::SystemConfig, transport::{TransportSender, Request, Response, TransportListener, RawResponse, Contact}, id::Id, storage::Storage, search::{BasicSearch, BasicSearchOptions, SearchType, SearchResult}};
 
 
 // TODO: push syncronization down the line to improve async performance
@@ -44,12 +44,11 @@ impl<T: TransportSender> KademliaDht<T> {
         self.storage.write().unwrap().periodic_run();
     }
 
-    fn get_closer_bucket(&self, key: &Id) -> Vec<Id> {
+    fn get_closer_bucket(&self, key: &Id) -> Vec<T::Contact> {
         self.tree.lock().unwrap()
             .get_closer_n(key, self.config.routing.bucket_size)
             .iter()
-            .cloned()
-            .cloned()
+            .map(|x| self.transport.wrap_contact((*x).clone()))
             .collect()
     }
 
@@ -70,7 +69,7 @@ impl<T: TransportSender> KademliaDht<T> {
         }
     }
 
-    pub async fn query_nodes(&self, key: Id, options: BasicSearchOptions) -> Vec<Id> {
+    pub async fn query_nodes(&self, key: Id, options: BasicSearchOptions) -> Vec<T::Contact> {
         let bucket = self.get_closer_bucket(&key);
         let searcher = BasicSearch::create(self, options, SearchType::Nodes, key);
         match searcher.search(bucket).await {
@@ -78,6 +77,8 @@ impl<T: TransportSender> KademliaDht<T> {
             SearchResult::DataFound(_) => unreachable!(),
         }
     }
+
+    // TODO: a boostrap function is needed!
 
     pub async fn insert(&self, key: Id, lifetime: Duration, value: Vec<u8>) -> Result<usize, crate::storage::Error> {
         // Insert key in the k closest nodes
@@ -87,12 +88,12 @@ impl<T: TransportSender> KademliaDht<T> {
 
         info!("Inserting {key:?} into the network for {lifetime}s");
 
-        let search_options = BasicSearchOptions { parallelism: 4 };
+        let search_options = BasicSearchOptions { parallelism: 2 };
         let nodes = self.query_nodes(key.clone(), search_options).await;
 
         let mut installation_count = 0;
 
-        if nodes.iter().any(|x| *x == self.id) {
+        if nodes.iter().any(|x| *x.id() == self.id) {
             self.storage.write().unwrap().insert(key.clone(), lifetime, value.clone()).unwrap();
             installation_count += 1;
         }
@@ -100,17 +101,17 @@ impl<T: TransportSender> KademliaDht<T> {
         let request = Request::Insert(key, lifetime, value);
 
         let mut answers = nodes.iter()
-            .filter(|x| **x != self.id)
+            .filter(|x| *x.id() != self.id)
             .map(|x| async {
                 // tag the future (to know which clients started it)
-                (x.clone(), self.transport.send(x, request.clone()).await)
+                (x.clone(), self.transport.send(x.id(), request.clone()).await)
             })
             .collect::<FuturesUnordered<_>>();
 
         while let Some((id, x)) = answers.next().await {
             match x {
-                Ok(Response::Done) => installation_count += 1,
-                Ok(Response::Error) => warn!("{id:?} returned an error"),
+                Ok(RawResponse::Done) => installation_count += 1,
+                Ok(RawResponse::Error) => warn!("{id:?} returned an error"),
                 Ok(_) => warn!("Unknown response received from {id:?}"),
                 Err(x) => warn!("Transport error querying {id:?}: {x}"),
             }
@@ -162,7 +163,8 @@ impl<T: TransportSender> TransportListener for KademliaDht<T> {
                     None => Response::FoundNodes(
                         tree
                             .get_closer_n(&x, self.config.routing.bucket_size)
-                            .iter()
+                            .into_iter()
+                            .filter(|x| *x != sender)
                             .map(|x| (*x).clone())
                             .collect()
                     )

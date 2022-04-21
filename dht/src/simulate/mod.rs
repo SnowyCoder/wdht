@@ -1,14 +1,15 @@
-use std::{sync::{Arc, Mutex}, collections::{HashMap, HashSet}, fmt::Write};
+use core::fmt;
+use std::{sync::{Arc, Mutex, Weak}, collections::{HashMap, HashSet, hash_map::Entry}, fmt::Write};
 
 use futures::Future;
 use log::{debug, trace};
 use tokio::sync::{mpsc, oneshot, broadcast, Barrier};
 
-use crate::{transport::{TransportSender, Response, Request, TransportError, TransportListener}, Id, KademliaDht, config::SystemConfig};
+use crate::{transport::{TransportSender, Response, Request, TransportError, TransportListener, Contact, RawResponse}, Id, KademliaDht, config::SystemConfig};
 
 
 #[derive(Debug)]
-struct TransportResponse {
+struct SimulatedResponse {
     payload: Response,
     // When sending Ids also send their location
     contacts: Vec<mpsc::Sender<TransportMessage>>,
@@ -28,16 +29,57 @@ enum TransportMessage {
     Request {
         id: Id,
         msg: Request,
-        res: oneshot::Sender<TransportResponse>,
+        res: oneshot::Sender<SimulatedResponse>,
     },
     ConnectTo {
         // Sent from transport to the actor when a new node is contacted
         ids: Vec<(Id, mpsc::Sender<TransportMessage>)>,
-        res: oneshot::Sender<()>,
+        res: oneshot::Sender<Vec<SearchContact>>,
     },
     // Used in testing
     Barrier(Arc<Barrier>),
 }
+
+#[derive(Clone, Debug)]
+pub enum SearchContact {
+    Routed(Id),
+    Owned(Arc<Inner>),
+}
+
+pub struct Inner {
+    id: Id,
+    parent: Arc<Mutex<TransportData>>,
+}
+
+impl fmt::Debug for Inner {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Inner")
+            .field("id", &self.id)
+            .finish()
+    }
+}
+
+impl Drop for SearchContact {
+    fn drop(&mut self) {
+        if let SearchContact::Owned(arc) = self {
+            if Arc::strong_count(&arc) == 1 {
+                trace!("Dropping contact: {:?}", arc.id);
+                let mut data = arc.parent.lock().unwrap();
+                data.on_contact_drop(&arc.id);
+            }
+        }
+    }
+}
+
+impl Contact for SearchContact {
+    fn id(&self) -> &Id {
+        match self {
+            SearchContact::Routed(x) => x,
+            SearchContact::Owned(x) => &x.id,
+        }
+    }
+}
+
 
 // TODO: you can't keep all contacts,
 //      We should have a maximum pool of contacts (N = max contact number)
@@ -102,7 +144,7 @@ impl Receiver {
             match mail {
                 Hello { id, mex } => {
                     if listener.as_ref().on_connect(&id) {
-                        self.sender.data.lock().unwrap().contacts.insert(id, mex);
+                        self.sender.data.lock().unwrap().contacts.insert(id, (mex, ContactLifetime::Routing));
                     }
                 }
                 Request { id, msg, res: wait } => {
@@ -113,12 +155,12 @@ impl Receiver {
                             // (in a WebRTC-like implementation this would be a tad more complex)
                             let routes = self.sender.data.lock().unwrap();
                             ids.iter()
-                                .map(|x| routes.contacts.get(x).unwrap().clone())
+                                .map(|x| routes.contacts.get(x).unwrap().0.clone())
                                 .collect()
                         }
                         _ => Vec::new(),
                     };
-                    let res = TransportResponse {
+                    let res = SimulatedResponse {
                         payload: res,
                         contacts,
                     };
@@ -126,24 +168,7 @@ impl Receiver {
                     let _ = wait.send(res);
                 }
                 ConnectTo { ids, res } => {
-                    for (id, mailbox) in ids.iter() {
-                        {
-                            let mut transport = self.sender.data.lock().unwrap();
-                            if transport.contacts.contains_key(id) {
-                                // Prevent double-join (possible when two connections discover)
-                                // the same address concurrently.
-                                continue;
-                            }
-
-                            if listener.as_ref().on_connect(id) {
-                                transport.contacts
-                                    .insert(id.clone(), mailbox.clone());
-                            } else {
-                                // Connection is not used in routing, so might even forget it
-                                // TODO: false, it might be still used for some querying, now it might panic!
-                            }
-
-                        }
+                    for (_, mailbox) in ids.iter() {
                         mailbox
                             .send(TransportMessage::Hello {
                                 id: self.sender.id.clone(),
@@ -153,7 +178,22 @@ impl Receiver {
                             .await
                             .expect("Failed to send hello");
                     }
-                    let _ = res.send(());
+                    let contacts = ids.iter()
+                        .map(|(id, mailbox)| {
+                            let mut transport = self.sender.data.lock().unwrap();
+                            if transport.contacts.contains_key(id) {
+                                // Prevent double-join (possible when two connections discover)
+                                // the same address concurrently.
+                                return SearchContact::Routed(id.clone());
+                            }
+
+                            let routed = listener.as_ref().on_connect(id);
+
+                            transport.insert(id.clone(), mailbox.clone(), &self.sender.data, routed)
+                        })
+                        .collect();
+
+                    let _ = res.send(contacts);
                 }
                 Barrier(b) => {
                     b.wait().await;
@@ -163,8 +203,67 @@ impl Receiver {
     }
 }
 
+enum ContactLifetime {
+    Routing,// Used for routing, should remain unless transport is lost
+    Temporary(Weak<Inner>),// Only used temporarily, can be dropped when not used anymore
+}
+
 struct TransportData {
-    contacts: HashMap<Id, mpsc::Sender<TransportMessage>>,
+    contacts: HashMap<Id, (mpsc::Sender<TransportMessage>, ContactLifetime)>,
+}
+
+impl TransportData {
+    fn insert(&mut self, id: Id, mailbox: mpsc::Sender<TransportMessage>, parent: &Arc<Mutex<TransportData>>, routed: bool) -> SearchContact {
+        if routed {
+            self.insert_routing(id.clone(), mailbox);
+            SearchContact::Routed(id)
+        } else {
+            self.insert_temp(id.clone(), mailbox, parent)
+        }
+    }
+
+    fn insert_routing(&mut self, id: Id, mailbox: mpsc::Sender<TransportMessage>) {
+        self.contacts.insert(id, (mailbox, ContactLifetime::Routing));
+    }
+
+    fn insert_temp(&mut self, id: Id, mailbox: mpsc::Sender<TransportMessage>, parent: &Arc<Mutex<TransportData>>) -> SearchContact {
+        match self.contacts.entry(id.clone()) {
+            Entry::Occupied(mut x) => {
+                match &mut x.get_mut().1 {
+                    ContactLifetime::Routing => SearchContact::Routed(id),
+                    ContactLifetime::Temporary(x) => {
+                        match x.upgrade() {
+                            Some(x) => SearchContact::Owned(x),
+                            None => {
+                                let inner = Arc::new(Inner {
+                                    id,
+                                    parent: parent.clone(),
+                                });
+                                *x = Arc::downgrade(&inner);
+                                SearchContact::Owned(inner)
+                            },
+                        }
+                    },
+                }
+            },
+            Entry::Vacant(x) => {
+                let inner = Arc::new(Inner {
+                    id,
+                    parent: parent.clone(),
+                });
+                x.insert((mailbox, ContactLifetime::Temporary(Arc::downgrade(&inner))));
+                SearchContact::Owned(inner)
+            },
+        }
+    }
+
+    fn on_contact_drop(&mut self, id: &Id) {
+        if let Some(x) = self.contacts.get_mut(id) {
+            if let ContactLifetime::Temporary(_) = x.1 {
+                self.contacts.remove(id);
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -175,12 +274,13 @@ pub struct Sender {
 }
 
 impl Sender {
-    async fn send_req(self, id: Id, msg: Request) -> Result<Response, TransportError> {
-        trace!("send_req({:?} to {:?}, {:?}", self.id, id, msg);
+    async fn send_req(self, id: Id, msg: Request) -> Result<RawResponse<SearchContact>, TransportError> {
+        trace!("send_req({:?} to {:?}, {:?})", self.id, id, msg);
         let sender = {
             let data = self.data.lock().unwrap();
             data.contacts.get(&id)
-                .expect("Cannot find contact")
+                .ok_or(TransportError::ContactLost)?
+                .0
                 .clone()
         };
         let (tx, rx) = oneshot::channel();
@@ -190,32 +290,28 @@ impl Sender {
             msg: msg.clone(),
             res: tx,
         }).await.expect("Failed to send request");
-        let TransportResponse {
+        let SimulatedResponse {
             payload,
             contacts
         } = rx.await.expect("Error receiving response");
 
-
         debug!("{:?} -> {:?} = {:?}? {:?}", self.id, id, msg, payload);
 
-        if let Response::FoundNodes(found) = &payload  {
-            let ids: Vec<_> = {
-                let data = self.data.lock().unwrap();
-                found.iter()
-                    .zip(contacts.into_iter())
-                    .filter(|(id, _)| !data.contacts.contains_key(id))
-                    .map(|(id, mail)| (id.clone(), mail))
-                    .collect()
-            };
-            if ids.len() > 0 {
+        use RawResponse::*;
+        let payload = match payload {
+            FoundNodes(nodes) => {
+                let x = nodes.into_iter().zip(contacts.into_iter()).collect();
                 let (tx, rx) = oneshot::channel();
                 self.receiver.send(TransportMessage::ConnectTo {
-                    ids,
+                    ids: x,
                     res: tx,
                 }).await.unwrap();
-                rx.await.unwrap();
-            }
-        }
+                FoundNodes(rx.await.unwrap())
+            },
+            FoundData(x) => FoundData(x),
+            Done => Done,
+            Error => Error,
+        };
         Ok(payload)
     }
 
@@ -249,11 +345,17 @@ impl TransportSender for Sender {
         // Yes, we don't simulate node failure yet
     }
 
-    type Fut = impl Future<Output=Result<Response, TransportError>>;
+    type Fut = impl Future<Output=Result<RawResponse<Self::Contact>, TransportError>>;
     fn send(&self, id: &Id, msg: Request) -> Self::Fut {
         let s = self.clone();
         s.send_req(id.clone(), msg)
     }
+
+    fn wrap_contact(&self, id: Id) -> Self::Contact {
+        SearchContact::Routed(id)
+    }
+
+    type Contact = SearchContact;
 }
 
 pub trait IntoDot {
@@ -289,7 +391,7 @@ mod tests {
     use std::{cmp::Reverse, time::Duration};
 
     use itertools::Itertools;
-    use log::info;
+    use log::{info, error};
     use rand::{prelude::{StdRng, SliceRandom}, SeedableRng, Rng};
 
     use crate::search::BasicSearchOptions;
@@ -334,7 +436,10 @@ mod tests {
         let res = a.query_nodes(bid.clone(), BasicSearchOptions {
             parallelism: 1,
         }).await;
-        assert_eq!(res, vec![bid.clone(), aid.clone()]);
+        assert_eq!(
+            res.iter().map(|x| x.id().clone()).collect::<Vec<_>>(),
+            vec![bid.clone(), aid.clone()]
+        );
 
         // Shutdown everything
         killswitch.send(()).unwrap();
@@ -391,7 +496,7 @@ mod tests {
         assert_eq!(
             found
                 .iter()
-                .map(|x| x.xor(&target).leading_zeros())
+                .map(|x| x.id().xor(&target).leading_zeros())
                 .collect::<Vec<_>>(),
             ids.iter()
                 .map(|x| x.xor(&target).leading_zeros())
@@ -434,7 +539,7 @@ mod tests {
             parallelism: 2,
         };
 
-        let n_max = 200_000usize;
+        let n_max = 2_000usize;
         let ids: Vec<Id> = (0..n_max)
             .map(|_| rng.gen())
             .collect();
@@ -463,16 +568,40 @@ mod tests {
         min/max/avg\n\
         {min}/{max}/{avg:.3}");
 
+        // Node querying tests:
+        for _ in 0..1000 {
+            // Node-querying test
+            let target: Id = rng.gen();
+            let receiver = dhts.choose(&mut rng).unwrap();
+            error!("Searching {:?} from {:?}", target, receiver.id());
+            let found = receiver.query_nodes(target.clone(), search_options.clone()).await;
+            // How can we check that node orderings are equivalent?
+            // We should check that the ordering has the best XOR distance from the target node
+            assert_eq!(
+                found
+                    .iter()
+                    .map(|x| x.id().xor(&target).leading_zeros())
+                    .collect::<Vec<_>>(),
+                ids.iter()
+                    .map(|x| x.xor(&target).leading_zeros())
+                    .sorted_by_key(|x| Reverse(*x))
+                    .take(config.routing.bucket_size)
+                    .collect::<Vec<_>>()
+            );
+        }
+
         // Insertion & retrieval test
         for _ in 0..100 {
             let target: Id = rng.gen();
             let (pusher, receiver) = dhts.choose_multiple(&mut rng, 2).next_tuple().unwrap();
             let data = rng.gen::<u128>().to_be_bytes().to_vec();
 
+            error!("Insertion...");
             let received = pusher.insert(target.clone(), Duration::from_secs(1), data.clone()).await.unwrap();
             assert_eq!(received, config.routing.bucket_size);
+            error!("Retrieval...");
             let found = receiver.query_value(target, search_options.clone()).await.unwrap();
-            assert_eq!(found, vec![]);
+            assert_eq!(found, data);
         }
 
         killswitch.send(()).unwrap();

@@ -239,6 +239,12 @@ mod tests {
         fn send(&self, _id: &Id, _msg: crate::transport::Request) -> Self::Fut {
             panic!();
         }
+
+        type Contact = Id;
+
+        fn wrap_contact(&self, _id: Id) -> Self::Contact {
+            panic!();
+        }
     }
 
     #[test]
@@ -324,6 +330,12 @@ mod tests {
         type Fut = future::Ready<Result<Response, TransportError>>;
         fn send(&self, _id: &Id, _msg: crate::transport::Request) -> Self::Fut {
             panic!();
+        }
+
+        type Contact = Id;
+
+        fn wrap_contact(&self, _id: Id) -> Self::Contact {
+            panic!()
         }
     }
 
