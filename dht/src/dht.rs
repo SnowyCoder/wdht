@@ -2,6 +2,7 @@ use std::{sync::{RwLock, Mutex}, time::Duration};
 
 use futures::{stream::FuturesUnordered, StreamExt};
 use log::{error, debug, info, warn};
+use rand::Rng;
 
 use crate::{ktree::KTree, config::SystemConfig, transport::{TransportSender, Request, Response, TransportListener, RawResponse, Contact}, id::Id, storage::Storage, search::{BasicSearch, BasicSearchOptions, SearchType, SearchResult}};
 
@@ -78,7 +79,32 @@ impl<T: TransportSender> KademliaDht<T> {
         }
     }
 
-    // TODO: a boostrap function is needed!
+    pub async fn bootstrap<R: Rng>(&self, options: BasicSearchOptions, rng: &mut R) {
+        let nodes = self.query_nodes(self.id.clone(), options.clone()).await;
+
+        // We are at index 0, because no-one can be closer than us
+        // TODO: what about conflicts? We should be able to handle these
+        let closest_sibling = match nodes.get(1) {
+            None => return,// DHT is empty, we are the only node
+            Some(x) => x,
+        };
+
+        let max_leading_zeros = (self.id ^ *closest_sibling.id()).leading_zeros();
+
+        let mut fu = (0..max_leading_zeros).rev()
+            .map(|bucket| {
+                let original_mask = Id::create_left_mask(bucket + 1);
+                // Keep original bucket - 1 bits, invert the bucket bit, randomically generate other bits
+                (self.id ^ Id::ZERO.set_bit(bucket) & original_mask) |
+                    (rng.gen::<Id>() & !original_mask)
+            })
+            .map(|id| self.query_nodes(id, options.clone()))
+            .collect::<FuturesUnordered<_>>();
+
+        while let Some(_) = fu.next().await {
+            continue;
+        }
+    }
 
     pub async fn insert(&self, key: Id, lifetime: Duration, value: Vec<u8>) -> Result<usize, crate::storage::Error> {
         // Insert key in the k closest nodes

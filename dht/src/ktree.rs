@@ -33,7 +33,7 @@ impl KTree {
     }
 
     fn get_bucket_index(&self, id: &Id) -> (usize, usize) {
-        let nid = self.id.xor(id);
+        let nid = self.id ^ *id;
         let entryi = nid.leading_zeros()
             .min((ID_LEN_BITS - self.config.buckets_per_bit) as u8);
         let bucketi = if self.config.buckets_per_bit == 1 {
@@ -204,7 +204,7 @@ impl<'a> NodeAggregator<'a> {
 
     pub fn finish(self, closer_to: &Id) -> Vec<&'a Id> {
         let Self {nodes: mut vec, limit} = self;
-        vec.sort_unstable_by_key(|x| closer_to.xor(x));
+        vec.sort_unstable_by_key(|x| *closer_to ^ **x);
         vec.truncate(limit);
         vec
     }

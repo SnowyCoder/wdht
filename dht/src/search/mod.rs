@@ -72,7 +72,7 @@ impl<'a, T: TransportSender> BasicSearch<'a, T> {
         };
 
         to.0 = QueryState::Querying;
-        let used_id = to.1.id().clone();
+        let used_id = *to.1.id();
 
         let message = match self.search_type {
             SearchType::Nodes => Request::FindNodes(self.target_id.clone()),
@@ -80,13 +80,13 @@ impl<'a, T: TransportSender> BasicSearch<'a, T> {
         };
 
         let fut = self.dht.transport().send(&used_id, message);
-        Some(fut.map(|x| (used_id, x)))
+        Some(fut.map(move |x| (used_id, x)))
     }
 
     fn sort_bucket(&self, bucket: &mut [(QueryState, T::Contact)]) {
         // Sort with leading zeros in descending order:
         // the first entries will have MORE leading zeros (so they'll be closer)
-        bucket.sort_by_key(|x| Reverse(x.1.id().xor(&self.target_id.id()).leading_zeros()));
+        bucket.sort_by_key(|x| Reverse((*x.1.id() ^ *self.target_id.id()).leading_zeros()));
     }
 
     pub async fn search(&self, first_bucket: Vec<T::Contact>) -> SearchResult<T::Contact> {

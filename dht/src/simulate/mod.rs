@@ -80,18 +80,6 @@ impl Contact for SearchContact {
     }
 }
 
-
-// TODO: you can't keep all contacts,
-//      We should have a maximum pool of contacts (N = max contact number)
-//      some contacts should be available for the routing table
-//      (R = max routing table contact n., with R < N)
-//      the others can be used for querying, (FILO queue?)
-//      There should also be some kind of reference counting for connections
-//      When a connection isn't used anymore it can be dropped
-// But when is a connection not used anymore?
-//      A connection can be used for: routing or searching
-//      A routing connection is never deallocated unless it's lost
-//      Just needs to manage searching connections? (how??)
 pub struct AsyncSimulatedTransport;
 
 impl AsyncSimulatedTransport {
@@ -391,7 +379,7 @@ mod tests {
     use std::{cmp::Reverse, time::Duration};
 
     use itertools::Itertools;
-    use log::{info, error};
+    use log::info;
     use rand::{prelude::{StdRng, SliceRandom}, SeedableRng, Rng};
 
     use crate::search::BasicSearchOptions;
@@ -496,10 +484,10 @@ mod tests {
         assert_eq!(
             found
                 .iter()
-                .map(|x| x.id().xor(&target).leading_zeros())
+                .map(|x| (*x.id() ^ target).leading_zeros())
                 .collect::<Vec<_>>(),
             ids.iter()
-                .map(|x| x.xor(&target).leading_zeros())
+                .map(|x| (*x ^ target).leading_zeros())
                 .sorted_by_key(|x| Reverse(*x))
                 .take(config.routing.bucket_size)
                 .collect::<Vec<_>>()
@@ -524,11 +512,12 @@ mod tests {
         killswitch.send(()).unwrap();
     }
 
-    /// Very expensive test that simulates 200k nodes
-    /// takes around 4.2GiB and (in my crappy laptop) ~35s
+    /// Very expensive test that simulates 100k nodes
+    /// takes around 3GiB and (in my crappy laptop) ~5 minutes.
+    /// It'd be better to use somewhat parallel bootstrapping.
     #[tokio::test]
     #[ignore]// Intensive test
-    async fn simulate_200k() {
+    async fn simulate_100k() {
         init();
         let mut rng = StdRng::seed_from_u64(0x123456789abcdef0);
 
@@ -536,10 +525,10 @@ mod tests {
 
         let config: SystemConfig = Default::default();
         let search_options = BasicSearchOptions {
-            parallelism: 2,
+            parallelism: 4,
         };
 
-        let n_max = 2_000usize;
+        let n_max = 100_000usize;
         let ids: Vec<Id> = (0..n_max)
             .map(|_| rng.gen())
             .collect();
@@ -549,12 +538,16 @@ mod tests {
             .map(|id| AsyncSimulatedTransport::spawn(config.clone(), id, killswitch.subscribe()))
             .collect::<Vec<_>>();
 
+
+        info!("Bootstrapping nodes...");
         // the first node is the rendevouz DHT (a.k.a. bootstrap dht)
         for i in 1..ids.len() {
-            //info!("----- NODE {:?} ----", ids[i]);
+            if i % 1000 == 0 {
+                info!("{i}/{n_max}");
+            }
             dhts[i].transport().connect_to(vec![(&ids[0], &dhts[0].transport)]).await;
             // Bootstrap
-            dhts[i].query_nodes(ids[i].clone(), search_options.clone()).await;
+            dhts[i].bootstrap(search_options.clone(), &mut rng).await;
         }
 
         let (min, max, avg) = dhts.iter()
@@ -564,31 +557,34 @@ mod tests {
             });
         let avg = avg as f32 / dhts.len() as f32;
 
-        eprintln!("Connections:\n\
+        info!("Connections:\n\
         min/max/avg\n\
         {min}/{max}/{avg:.3}");
 
+        info!("Starting node search test...");
         // Node querying tests:
         for _ in 0..1000 {
             // Node-querying test
             let target: Id = rng.gen();
             let receiver = dhts.choose(&mut rng).unwrap();
-            error!("Searching {:?} from {:?}", target, receiver.id());
+            debug!("Searching {:?} from {:?}", target, receiver.id());
             let found = receiver.query_nodes(target.clone(), search_options.clone()).await;
             // How can we check that node orderings are equivalent?
             // We should check that the ordering has the best XOR distance from the target node
             assert_eq!(
                 found
                     .iter()
-                    .map(|x| x.id().xor(&target).leading_zeros())
+                    .map(|x| (*x.id() ^ target).leading_zeros())
                     .collect::<Vec<_>>(),
                 ids.iter()
-                    .map(|x| x.xor(&target).leading_zeros())
+                    .map(|x| (*x ^ target).leading_zeros())
                     .sorted_by_key(|x| Reverse(*x))
                     .take(config.routing.bucket_size)
                     .collect::<Vec<_>>()
             );
         }
+
+        info!("Starting insertion/retrieval test...");
 
         // Insertion & retrieval test
         for _ in 0..100 {
@@ -596,13 +592,14 @@ mod tests {
             let (pusher, receiver) = dhts.choose_multiple(&mut rng, 2).next_tuple().unwrap();
             let data = rng.gen::<u128>().to_be_bytes().to_vec();
 
-            error!("Insertion...");
+            debug!("Inserting {:?} from {:?}", target, pusher.id());
             let received = pusher.insert(target.clone(), Duration::from_secs(1), data.clone()).await.unwrap();
             assert_eq!(received, config.routing.bucket_size);
-            error!("Retrieval...");
+            debug!("Retrieving {:?} from {:?}", target, receiver.id());
             let found = receiver.query_value(target, search_options.clone()).await.unwrap();
             assert_eq!(found, data);
         }
+        info!("Shutting system down");
 
         killswitch.send(()).unwrap();
     }
