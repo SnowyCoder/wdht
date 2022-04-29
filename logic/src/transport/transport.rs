@@ -1,5 +1,7 @@
 use std::{future::Future, fmt::Debug};
 
+#[cfg(feature = "serde")]
+use serde::{Serialize, Deserialize};
 use thiserror::Error;
 
 use crate::id::Id;
@@ -71,14 +73,15 @@ pub trait TransportSender : Clone + Send {
 
 pub trait TransportListener {
     /// Returns true only if the id is used in the routing protocol
-    fn on_connect(&self, id: &Id) -> bool;
+    fn on_connect(&self, id: Id) -> bool;
 
-    fn on_disconnect(&self, id: &Id);
+    fn on_disconnect(&self, id: Id);
 
-    fn on_request(&self, sender: &Id, request: Request) -> Response;
+    fn on_request(&self, sender: Id, request: Request) -> Response;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum Request {
     FindNodes(Id),
     FindData(Id),
@@ -87,6 +90,7 @@ pub enum Request {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum RawResponse<T> {
     FoundNodes(Vec<T>),
     FoundData(Vec<u8>),

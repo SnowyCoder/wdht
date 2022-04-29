@@ -1,13 +1,42 @@
 use std::{fmt::Debug, ops::{Shr, BitXor, BitAnd, BitOr, Not}};
 
 use itertools::izip;
-#[cfg(feature = "rand")]
 use rand::{Rng, prelude::Distribution, distributions::Standard};
+#[cfg(feature = "serde")]
+use serde::{Serialize, Deserialize};
 
 use crate::consts::ID_LEN;
 
 #[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct Id(pub [u8; ID_LEN]);
+
+#[cfg(feature = "serde")]
+impl Serialize for Id {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer {
+
+        if serializer.is_human_readable() {
+            hex::serde::serialize(&self.0, serializer)
+        } else {
+            serializer.serialize_bytes(&self.0)
+        }
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> Deserialize<'de> for Id {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de> {
+        let raw = if deserializer.is_human_readable() {
+            hex::serde::deserialize(deserializer)?
+        } else {
+            <_ as Deserialize>::deserialize(deserializer)?
+        };
+        Ok(Id(raw))
+    }
+}
 
 impl BitXor<Id> for Id {
     type Output = Id;
@@ -129,7 +158,6 @@ impl Debug for Id {
     }
 }
 
-#[cfg(feature = "rand")]
 impl Distribution<Id> for Standard {
     fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> Id {
         let mut id = [0u8; ID_LEN];

@@ -33,8 +33,8 @@ impl<T: TransportSender> KademliaDht<T> {
         &self.config
     }
 
-    pub fn id(&self) -> &Id {
-        &self.id
+    pub fn id(&self) -> Id {
+        self.id
     }
 
     pub fn transport(&self) -> &T {
@@ -45,7 +45,7 @@ impl<T: TransportSender> KademliaDht<T> {
         self.storage.write().unwrap().periodic_run();
     }
 
-    fn get_closer_bucket(&self, key: &Id) -> Vec<T::Contact> {
+    fn get_closer_bucket(&self, key: Id) -> Vec<T::Contact> {
         self.tree.lock().unwrap()
             .get_closer_n(key, self.config.routing.bucket_size)
             .iter()
@@ -56,13 +56,13 @@ impl<T: TransportSender> KademliaDht<T> {
     pub async fn query_value(&self, key: Id, options: BasicSearchOptions) -> Option<Vec<u8>> {
         {// Check if it's already in storage
             let storage = self.storage.read().unwrap();
-            let data = storage.get(&key);
+            let data = storage.get(key);
             if let Some(data) = data {
                 return Some(data.clone());
             }
         }
 
-        let bucket = self.get_closer_bucket(&key);
+        let bucket = self.get_closer_bucket(key);
         let searcher = BasicSearch::create(self, options, SearchType::Data, key);
         match searcher.search(bucket).await {
             SearchResult::CloserNodes(_) => None,
@@ -71,7 +71,7 @@ impl<T: TransportSender> KademliaDht<T> {
     }
 
     pub async fn query_nodes(&self, key: Id, options: BasicSearchOptions) -> Vec<T::Contact> {
-        let bucket = self.get_closer_bucket(&key);
+        let bucket = self.get_closer_bucket(key);
         let searcher = BasicSearch::create(self, options, SearchType::Nodes, key);
         match searcher.search(bucket).await {
             SearchResult::CloserNodes(x) => x,
@@ -149,20 +149,20 @@ impl<T: TransportSender> KademliaDht<T> {
 
 
 impl<T: TransportSender> TransportListener for KademliaDht<T> {
-    fn on_connect(&self, id: &Id) -> bool {
+    fn on_connect(&self, id: Id) -> bool {
         info!("{:?}: Connnected {:?}", self.id, id);
         self.tree.lock()
             .unwrap()
-            .insert(id.clone(), &self.transport)
+            .insert(id, &self.transport)
     }
 
-    fn on_disconnect(&self, id: &Id) {
+    fn on_disconnect(&self, id: Id) {
         self.tree.lock()
             .unwrap()
             .remove(id);
     }
 
-    fn on_request(&self, sender: &Id, message: Request) -> Response {
+    fn on_request(&self, sender: Id, message: Request) -> Response {
         debug!("{:?} Request from {:?}: {:?}", self.id(), sender, message);
         let mut tree = self.tree.lock().unwrap();
         tree.refresh(sender);
@@ -170,10 +170,9 @@ impl<T: TransportSender> TransportListener for KademliaDht<T> {
         match message {
             Request::FindNodes(x) => {
                 // TODO: how many nodes to search?
-                let found = tree.get_closer_n(&x, self.config.routing.bucket_size);
+                let found = tree.get_closer_n(x, self.config.routing.bucket_size);
                 let found = found.into_iter()
                     .filter(|x| *x != sender)
-                    .map(|x| (*x).clone())
                     .collect();
 
                 debug!("| Find closer {:?}: {:?}", x, found);
@@ -184,14 +183,13 @@ impl<T: TransportSender> TransportListener for KademliaDht<T> {
                 // Send data if stored
                 // Else send closer nodes known
                 let storage = self.storage.read().unwrap();
-                let res = match storage.get(&x) {
+                let res = match storage.get(x) {
                     Some(x) => Response::FoundData(x.clone()),
                     None => Response::FoundNodes(
                         tree
-                            .get_closer_n(&x, self.config.routing.bucket_size)
+                            .get_closer_n(x, self.config.routing.bucket_size)
                             .into_iter()
                             .filter(|x| *x != sender)
-                            .map(|x| (*x).clone())
                             .collect()
                     )
                 };

@@ -32,8 +32,8 @@ impl KTree {
         }
     }
 
-    fn get_bucket_index(&self, id: &Id) -> (usize, usize) {
-        let nid = self.id ^ *id;
+    fn get_bucket_index(&self, id: Id) -> (usize, usize) {
+        let nid = self.id ^ id;
         let entryi = nid.leading_zeros()
             .min((ID_LEN_BITS - self.config.buckets_per_bit) as u8);
         let bucketi = if self.config.buckets_per_bit == 1 {
@@ -47,17 +47,17 @@ impl KTree {
         return (entryi as usize, bucketi);
     }
 
-    fn get_bucket(&self, id: &Id) -> &KBucket {
+    fn get_bucket(&self, id: Id) -> &KBucket {
         let indexes = self.get_bucket_index(id);
         &self.nodes[indexes.0].buckets[indexes.1]
     }
 
-    fn get_bucket_mut(&mut self, id: &Id) -> &mut KBucket {
+    fn get_bucket_mut(&mut self, id: Id) -> &mut KBucket {
         let indexes = self.get_bucket_index(id);
         &mut self.nodes[indexes.0].buckets[indexes.1]
     }
 
-    pub fn has(&self, id: &Id) -> bool {
+    pub fn has(&self, id: Id) -> bool {
         return self.get_bucket(id).has(id);
     }
 
@@ -65,21 +65,21 @@ impl KTree {
         if id == self.id {
             return false;
         }
-        let index = self.get_bucket_index(&id);
+        let index = self.get_bucket_index(id);
         self.nodes[index.0]
             .buckets[index.1]
             .insert(id, &self.config, contacter)
     }
 
-    pub fn remove(&mut self, id: &Id) {
-        self.get_bucket_mut(&id).remove(id)
+    pub fn remove(&mut self, id: Id) {
+        self.get_bucket_mut(id).remove(id)
     }
 
-    pub fn refresh(&mut self, id: &Id) -> bool {
-        self.get_bucket_mut(&id).refresh_node(id)
+    pub fn refresh(&mut self, id: Id) -> bool {
+        self.get_bucket_mut(id).refresh_node(id)
     }
 
-    pub fn get_closer_n(&self, closer_to: &Id, size: usize) -> Vec<&Id> {
+    pub fn get_closer_n(&self, closer_to: Id, size: usize) -> Vec<Id> {
         let mut res = NodeAggregator::new(size);
         let index = self.get_bucket_index(closer_to);
 
@@ -173,12 +173,12 @@ impl KTree {
 }
 
 /// Utility struct that manages nodes aggregation for closer_n queries
-struct NodeAggregator<'a> {
-    nodes: Vec<&'a Id>,
+struct NodeAggregator {
+    nodes: Vec<Id>,
     limit: usize,
 }
 
-impl<'a> NodeAggregator<'a> {
+impl NodeAggregator {
     pub fn new(limit: usize) -> Self {
         NodeAggregator {
             nodes: Vec::new(),
@@ -190,21 +190,21 @@ impl<'a> NodeAggregator<'a> {
         self.nodes.len() >= self.limit
     }
 
-    pub fn add_bucket(&mut self, bucket: &'a KBucket) {
+    pub fn add_bucket(&mut self, bucket: &KBucket) {
         for x in bucket.entries.iter() {
-            self.nodes.push(x);
+            self.nodes.push(*x);
         }
     }
 
-    pub fn add_entry(&mut self, entry: &'a KTreeEntry) {
+    pub fn add_entry(&mut self, entry: &KTreeEntry) {
         for x in entry.buckets.iter() {
             self.add_bucket(x);
         }
     }
 
-    pub fn finish(self, closer_to: &Id) -> Vec<&'a Id> {
+    pub fn finish(self, closer_to: Id) -> Vec<Id> {
         let Self {nodes: mut vec, limit} = self;
-        vec.sort_unstable_by_key(|x| *closer_to ^ **x);
+        vec.sort_unstable_by_key(|x| closer_to ^ *x);
         vec.truncate(limit);
         vec
     }
@@ -277,7 +277,7 @@ mod tests {
         assert_eq!(tree.insert(Id::from_hex("a0000111"), contacter), false);// full
 
         // client a100 disconnects, so a110 enters cache and we can insert a111 (well, in the cache)
-        tree.remove(&Id::from_hex("a0000100"));
+        tree.remove(Id::from_hex("a0000100"));
         assert_eq!(tree.insert(Id::from_hex("a0000111"), contacter), true);// cached
     }
 
@@ -300,7 +300,7 @@ mod tests {
         tree.insert(Id::from_hex("a0000001"), contacter);
         tree.insert(Id::from_hex("a0000010"), contacter);
 
-        let actual = tree.get_closer_n(&Id::from_hex("b0001001"), 3)
+        let actual = tree.get_closer_n(Id::from_hex("b0001001"), 3)
                 .iter()
                 .map(|x| (*x).clone())
                 .collect::<Vec<_>>();
@@ -377,7 +377,7 @@ mod tests {
 
         let old_map = contacter.inner().clone();
         // client a100 disconnects, so a110 enters cache and we can insert a111 (well, in the cache)
-        tree.remove(&Id::from_hex("a0000100"));
+        tree.remove(Id::from_hex("a0000100"));
         assert_eq!(*contacter.inner(), old_map);
         contacter.inner().clear();
         assert_eq!(tree.insert(Id::from_hex("a0000100"), &mut contacter), true);// cached

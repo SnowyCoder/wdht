@@ -4,7 +4,6 @@
 
 pub mod config;
 pub mod search;
-pub mod simulate;
 pub mod consts;
 pub mod transport;
 mod storage;

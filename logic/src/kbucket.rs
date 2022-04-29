@@ -8,10 +8,10 @@ pub struct KBucket {
 }
 
 impl KBucket {
-    pub fn refresh_node(&mut self, id: &Id) -> bool {
+    pub fn refresh_node(&mut self, id: Id) -> bool {
         let entry = self.entries.iter_mut()
             .enumerate()
-            .find(|(_, x)| **x == *id);
+            .find(|(_, x)| **x == id);
 
         match entry {
             Some((index, _entry)) => {
@@ -23,13 +23,13 @@ impl KBucket {
         }
     }
 
-    pub fn has(&self, id: &Id) -> bool {
+    pub fn has(&self, id: Id) -> bool {
         (self.entries.iter().chain(self.replacement_cache.iter()))
-                .any(|x| *x == *id)
+                .any(|x| *x == id)
     }
 
     pub fn insert<T: TransportSender>(&mut self, id: Id, config: &RoutingConfig, contacter: &T) -> bool {
-        if self.has(&id) {
+        if self.has(id) {
             return false;
         }
         if self.entries.len() < config.bucket_size {
@@ -48,8 +48,8 @@ impl KBucket {
         }
     }
 
-    pub fn remove(&mut self, id: &Id) {
-        let i = self.entries.iter().position(|x| *x == *id);
+    pub fn remove(&mut self, id: Id) {
+        let i = self.entries.iter().position(|x| *x == id);
         if let Some(i) = i {
             self.entries.remove(i);
             // Promote one item from the cache (if present)
@@ -57,7 +57,7 @@ impl KBucket {
                 self.entries.push(self.replacement_cache.remove(0));
             }
         } else {
-            if let Some(i) = self.replacement_cache.iter().position(|x| *x == *id) {
+            if let Some(i) = self.replacement_cache.iter().position(|x| *x == id) {
                 self.replacement_cache.remove(i);
             }
         }

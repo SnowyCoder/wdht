@@ -131,12 +131,12 @@ impl Receiver {
             use TransportMessage::*;
             match mail {
                 Hello { id, mex } => {
-                    if listener.as_ref().on_connect(&id) {
+                    if listener.as_ref().on_connect(id) {
                         self.sender.data.lock().unwrap().contacts.insert(id, (mex, ContactLifetime::Routing));
                     }
                 }
                 Request { id, msg, res: wait } => {
-                    let res = listener.as_ref().on_request(&id, msg);
+                    let res = listener.as_ref().on_request(id, msg);
                     let contacts = match &res {
                         Response::FoundNodes(ids) => {
                             // We're sending node ids, also send contact data!
@@ -175,7 +175,7 @@ impl Receiver {
                                 return SearchContact::Routed(id.clone());
                             }
 
-                            let routed = listener.as_ref().on_connect(id);
+                            let routed = listener.as_ref().on_connect(*id);
 
                             transport.insert(id.clone(), mailbox.clone(), &self.sender.data, routed)
                         })

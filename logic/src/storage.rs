@@ -37,8 +37,8 @@ impl Storage {
         }
     }
 
-    pub fn get(&self, id: &Id) -> Option<&Vec<u8>> {
-        self.data.get(id)
+    pub fn get(&self, id: Id) -> Option<&Vec<u8>> {
+        self.data.get(&id)
     }
 
     pub fn periodic_run(&mut self) {

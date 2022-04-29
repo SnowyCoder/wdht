@@ -1,0 +1,20 @@
+[package]
+name = "wdht-transport"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1.0.57"
+tokio = { version = "1.17.0", features = ["rt", "sync", "macros", "time"] }
+datachannel = { version = "0.7.5", features = ["static", "log"] }
+wdht-logic = { path = "../logic", version = "0.1" }
+serde = "1.0.136"
+serde_json = "1.0.79"
+log = "0.4.16"
+thiserror = "1.0.30"
+futures = "0.3.21"
+
+[dev-dependencies]
+anyhow = "1.0.57"

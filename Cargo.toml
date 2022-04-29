@@ -1,7 +1,8 @@
 [workspace]
 
 members = [
-    "dht",
+    "logic",
+    "transport",
     "web",
 ]
 
