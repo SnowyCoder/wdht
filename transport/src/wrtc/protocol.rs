@@ -1,8 +1,9 @@
+use datachannel::SessionDescription;
 use serde::{Deserialize, Serialize};
 use wdht_logic::{Id, transport::{Request, RawResponse}};
 
-type WrtcOffer = Vec<u8>;
-type WrtcAnswer = Vec<u8>;
+type WrtcOffer = SessionDescription;
+type WrtcAnswer = SessionDescription;
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct HandshakeRequest {

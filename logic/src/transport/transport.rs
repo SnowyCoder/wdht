@@ -108,4 +108,7 @@ pub enum TransportError {
 
     #[error("Cannot find client address")]
     ContactLost,
+
+    #[error("Unknown transport error {0}")]
+    UnknownError(String),
 }

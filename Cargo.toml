@@ -4,6 +4,7 @@ members = [
     "logic",
     "transport",
     "web",
+    "server",
 ]
 
 
