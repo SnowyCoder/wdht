@@ -3,8 +3,8 @@ use std::sync::{Arc, Mutex, Weak};
 pub use datachannel::{ConnectionState, IceCandidate, RtcConfig, SessionDescription};
 use datachannel::{DataChannelHandler, PeerConnectionHandler, RtcDataChannel, RtcPeerConnection, DataChannelInit, SdpType, GatheringState, SignalingState};
 use thiserror::Error;
-use tokio::sync::{oneshot, mpsc};
-use log::{debug, error};
+use tokio::sync::{oneshot, mpsc::{self, error::TrySendError}};
+use log::{debug, error, info};
 
 #[derive(Error, Debug)]
 pub enum WrtcError {
@@ -16,6 +16,8 @@ pub enum WrtcError {
     SignalingFailed,
     #[error("Invalid session description")]
     InvalidDescription,
+    #[error("Connection limit reached")]
+    ConnectionLimitReached,
 }
 
 pub enum ConnectionRole {
@@ -37,6 +39,8 @@ pub async fn create_channel(config: &RtcConfig, role: ConnectionRole, answer: on
     let (ready, rx_inbound, chan) = ChannelHandler::new();
     let dc_init = DataChannelInit::default()
         .negotiated()
+        .manual_stream()
+        .stream(0)
         .protocol("wrtc_json");
 
     let dc = conn.lock().unwrap()
@@ -66,6 +70,8 @@ pub async fn create_channel(config: &RtcConfig, role: ConnectionRole, answer: on
     // Wait for the datachannel to be ready
     ready.await
         .map_err(|_| WrtcError::SignalingFailed)??;
+
+    debug!("Datachannel open");
 
     // Return the newly created channel (along with the PeerConnection so it does not close)
     Ok(WrtcChannel {
@@ -128,7 +134,11 @@ impl DataChannelHandler for ChannelHandler {
     }
 
     fn on_closed(&mut self) {
-        let _ = self.inbound_tx.send(Err(WrtcError::ConnectionLost));
+        debug!("Datachannel closed");
+        if let Err(TrySendError::Full(x)) = self.inbound_tx.try_send(Err(WrtcError::ConnectionLost)) {
+            let itx = self.inbound_tx.clone();
+            tokio::spawn(async move { itx.send(x).await });
+        }
     }
 
     fn on_error(&mut self, err: &str) {
@@ -139,11 +149,11 @@ impl DataChannelHandler for ChannelHandler {
             .map(|x| x.send(Err(WrtcError::DataChannelError(err.to_string()))));
         let _ = self
             .inbound_tx
-            .try_send(Err(WrtcError::DataChannelError(err.to_string())));
+            .blocking_send(Err(WrtcError::DataChannelError(err.to_string())));
     }
 
     fn on_message(&mut self, msg: &[u8]) {
-        let _ = self.inbound_tx.try_send(Ok(msg.to_vec()));
+        let _ = self.inbound_tx.blocking_send(Ok(msg.to_vec()));
     }
 
     // TODO: implement back-pressure
@@ -178,6 +188,7 @@ impl PeerConnectionHandler for ConnectionHandler {
     }
 
     fn on_connection_state_change(&mut self, state: ConnectionState) {
+        debug!("Connection state change: {:?}", state);
         use ConnectionState::*;
         let is_successful = match state {
             New | Connecting => return,
@@ -212,6 +223,7 @@ impl PeerConnectionHandler for ConnectionHandler {
     }
 
     fn on_data_channel(&mut self, _data_channel: Box<RtcDataChannel<Self::DCH>>) {
+        info!("Peer tried to open data channel");
     }
 
     fn on_signaling_state_change(&mut self, _state: SignalingState) {

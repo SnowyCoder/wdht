@@ -2,7 +2,7 @@ use std::{borrow::Cow, collections::HashMap, sync::{Weak, Mutex, Arc}, time::Dur
 
 use datachannel::RtcDataChannel;
 use futures::future::join_all;
-use log::{warn, debug};
+use log::{warn, debug, info};
 use serde::Serialize;
 use thiserror::Error;
 use tokio::{sync::{oneshot, mpsc}, time::timeout};
@@ -69,6 +69,7 @@ pub async fn handshake_active(conn: &mut WrtcChannel, id: Id) -> Result<Id, Peer
     conn.data_channel.send(&msg)
         .map_err(|_| WrtcError::ConnectionLost)?;
 
+    info!("Waiting for handshake response...");
     let msg = conn.listener.recv().await
         .ok_or(WrtcError::ConnectionLost)??;
     let res = serde_json::from_slice::<HandshakeResponse>(&msg)?;
@@ -85,23 +86,43 @@ struct InnerWrtcConnection {
     responses: HashMap<u32, oneshot::Sender<Result<WrtcResponse, TransportError>>>,
     _conn: async_wrtc::Connection,
     channel: Box<RtcDataChannel<ChannelHandler>>,
+    /// True when the connection is also used in routing tables (so we can't drop the connection)
+    dont_cleanup: bool,
+    /// If true the peer won't be issuing other requests but will still answer requests
+    other_half_closed: bool,
+    this_half_closed: bool,
 }
 
 impl InnerWrtcConnection {
-    pub fn send_request(&mut self, mex: WrtcRequest) -> oneshot::Receiver<Result<WrtcResponse, TransportError>> {
+    fn wrap_message(&mut self, mex: WrtcRequest) -> WrtcMessage {
         let req_id = self.next_id;
-        self.next_id += 1;
-        let message = WrtcMessage {
+        self.next_id = req_id.wrapping_add(1);
+        WrtcMessage {
             id: req_id,
             payload: WrtcPayload::Req(mex),
-        };
+        }
+    }
+
+    fn send_raw(&mut self, mex: WrtcRequest) -> Result<(), WrtcError> {
+        let message = self.wrap_message(mex);
+        let data = serde_json::to_vec(&message).expect("Failed to serialize");
+
+        self.channel.send(&data)
+            .map_err(|_| WrtcError::DataChannelError("Failed to send message".into()))
+    }
+
+    pub fn send_request(&mut self, mex: WrtcRequest) -> oneshot::Receiver<Result<WrtcResponse, TransportError>> {
+        let message = self.wrap_message(mex);
+        debug!("Send: {:?}", message);
 
         let (send, recv) = oneshot::channel();
-        self.responses.insert(req_id, send);
+        self.responses.insert(message.id, send);
 
-        // TODO: better error management
         let data = serde_json::to_vec(&message).expect("Failed to serialize");
-        self.channel.send(&data).expect("Failed to send message to channel");
+        if let Err(_err) = self.channel.send(&data) {
+            self.responses.remove(&message.id)
+                .map(|x| x.send(Err(TransportError::UnknownError("Failed to send message".to_string()))));
+        }
 
         recv
     }
@@ -112,6 +133,7 @@ impl InnerWrtcConnection {
             payload: WrtcPayload::Res(res),
         };
 
+        debug!("Send: {:?}", message);
         // TODO: better error management
         let data = serde_json::to_vec(&message).expect("Failed to serialize");
         self.channel.send(&data).expect("Failed to send message to channel");
@@ -137,6 +159,9 @@ impl WrtcConnection {
                 responses: HashMap::new(),
                 _conn: peer_connection,
                 channel: data_channel,
+                dont_cleanup: false,
+                other_half_closed: false,
+                this_half_closed: false,
             }),
             parent,
         });
@@ -176,22 +201,60 @@ impl WrtcConnection {
         self.inner.lock().unwrap().send_response(id, res)
     }
 
-    fn shutdown(self: Arc<Self>) {
+    fn shutdown(self: &Arc<Self>) {
+        debug!("Shutting down connection");
         let parent = match self.parent.upgrade() {
             Some(x) => x,
             None => return,
         };
-        parent.connection.lock().unwrap().remove(&self.peer_id);
+        parent.connections.lock().unwrap().remove(&self.peer_id);
+        parent.on_disconnect(self.peer_id, true, self.inner.lock().unwrap().this_half_closed);
 
-        let mut inner = self.inner.lock().unwrap();
-        for (_id, resp) in inner.responses.drain() {
-            let _ = resp.send(Err(TransportError::ConnectionLost));
+        self.shutdown_local();
+    }
+
+    pub(crate) fn shutdown_local(self: &Arc<Self>) {
+        {
+            let mut inner = self.inner.lock().unwrap();
+            for (_id, resp) in inner.responses.drain() {
+                let _ = resp.send(Err(TransportError::ConnectionLost));
+            }
         }
+    }
+
+    fn send_half_close(&self) -> Result<(), WrtcError> {
+        self.inner.lock().unwrap().send_raw(WrtcRequest::HalfClose)
+    }
+
+    /// Called when the last usable contact is lost, will try to close (or half-close) the connection
+    pub fn on_contact_lost(self: &Arc<Self>) {
+        let other_half_closed = {
+            let mut inner = self.inner.lock().unwrap();
+            if inner.dont_cleanup {
+                return;// Can't close this half, it's used in the routing table
+            }
+            inner.this_half_closed = true;
+            inner.other_half_closed
+        };
+        if other_half_closed {
+            info!("Closing connection (both halfes closed)");
+            self.shutdown();
+        } else {
+            self.parent.upgrade().map(|x| x.on_half_closed(self.peer_id));
+            if let Err(x) = self.send_half_close() {
+                warn!("Failed to send half-close {}", x);
+            }
+        }
+    }
+
+    pub fn set_dont_cleanup(self: &Arc<Self>, dont_cleanup: bool) {
+        self.inner.lock().unwrap().dont_cleanup = dont_cleanup;
     }
 }
 
 fn process_message(msg: &[u8], conn: Arc<WrtcConnection>) -> Result<(), PeerMessageError> {
     let msg: WrtcMessage = serde_json::from_slice(&msg)?;
+    debug!("Received message: {:?}", msg);
     let req = match msg.payload {
         WrtcPayload::Req(x) => x,
         WrtcPayload::Res(x) => {
@@ -218,7 +281,7 @@ fn process_message(msg: &[u8], conn: Arc<WrtcConnection>) -> Result<(), PeerMess
             inner.send_response(msg.id, WrtcResponse::Ans(ans));
         },
         WrtcRequest::ForwardOffer(offers) => {
-            let connections = root.connection.lock().unwrap();
+            let connections = root.connections.lock().unwrap();
             let fut = join_all(offers.into_iter()
                     .map(|(id, offer)| {
                 let conn = connections.get(&id).cloned();
@@ -257,6 +320,15 @@ fn process_message(msg: &[u8], conn: Arc<WrtcConnection>) -> Result<(), PeerMess
                 }
             });
         },
+        WrtcRequest::HalfClose => {
+            let mut inner = conn.inner.lock().unwrap();
+            inner.other_half_closed = true;
+            if inner.this_half_closed {
+                info!("Closing connection after half_close (both halfes closed)");
+                drop(inner);
+                conn.shutdown();
+            }
+        }
     }
 
     Ok(())
@@ -268,17 +340,20 @@ async fn connection_listen(mut mex_rx: mpsc::Receiver<Result<Vec<u8>, WrtcError>
             (Ok(x), Some(conn)) => {
                 if let Err(x) = process_message(&x, conn) {
                     warn!("Error while processing message: {}", x);
-                    return;
+                    break;
                 }
             }
             (Err(WrtcError::ConnectionLost), _) | (_, None) => {
-                debug!("Connection lost");
-                return;
+                info!("Connection lost");
+                break;
             }
             (Err(x), _) => {
                 warn!("Peer message error: {}", x);
-                return;
+                break;
             }
         }
+    }
+    if let Some(x) = conn.upgrade() {
+        x.shutdown();
     }
 }

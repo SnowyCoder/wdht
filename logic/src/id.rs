@@ -1,5 +1,6 @@
-use std::{fmt::Debug, ops::{Shr, BitXor, BitAnd, BitOr, Not}};
+use std::{fmt::{Debug, Display}, ops::{Shr, BitXor, BitAnd, BitOr, Not}, str::FromStr};
 
+use hex::FromHexError;
 use itertools::izip;
 use rand::{Rng, prelude::Distribution, distributions::Standard};
 #[cfg(feature = "serde")]
@@ -149,12 +150,36 @@ impl Id {
         let hex_id = hex::encode(&self.0);
         hex_id.trim_start_matches('0').to_owned()
     }
+
+    pub fn from_hex(data: &str) -> Id {
+        Self::from_str(data).expect("Invalid provided string")
+    }
+}
+
+impl FromStr for Id {
+    type Err = FromHexError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut id = Id([0; ID_LEN]);
+        let r = hex::decode(s)?;
+        for (i, r) in r.iter().rev().enumerate() {
+            id.0[id.0.len() - i - 1] = *r;
+        }
+        Ok(id)
+    }
 }
 
 impl Debug for Id {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let short_id = self.as_short_hex();
         f.debug_tuple("Id").field(&short_id).finish()
+    }
+}
+
+impl Display for Id {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let short_id = self.as_short_hex();
+        f.write_str(&short_id)
     }
 }
 

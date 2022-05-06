@@ -3,16 +3,19 @@ use std::sync::Arc;
 use warp::{cors, Filter};
 use wdht_logic::KademliaDht;
 
-use crate::{wrtc::WrtcSender, http_api::{ConnectRequest, ConnectResponse}};
+use crate::{wrtc::{WrtcSender, async_wrtc::WrtcError}, http_api::{ConnectRequest, ConnectResponse}};
 
-async fn dht_connect_handle(dht: Arc<KademliaDht<WrtcSender>>, req: ConnectRequest) -> ConnectResponse {
+async fn dht_connect_handle(dht: Arc<KademliaDht<WrtcSender>>, req: ConnectRequest) -> ConnectResponse<'static> {
     match dht.transport().0.clone().create_passive(req.offer).await {
         Ok(x) => ConnectResponse::Ok {
             answer: x,
         },
+        Err(WrtcError::ConnectionLimitReached) => ConnectResponse::Error {
+            description: "Connection limit reached".into(),
+        },
         Err(_) => ConnectResponse::Error {
             description: "Error creating Wrtc connection".into(),
-        }
+        },
     }
 }
 

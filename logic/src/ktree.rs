@@ -20,6 +20,7 @@ pub struct KTree {
     id: Id,
     config: RoutingConfig,
     nodes: [KTreeEntry; ID_LEN_BITS],
+    size: u64,
 }
 
 impl KTree {
@@ -29,6 +30,7 @@ impl KTree {
             id,
             config,
             nodes,
+            size: 0,
         }
     }
 
@@ -65,14 +67,27 @@ impl KTree {
         if id == self.id {
             return false;
         }
+        // Check max connection count
+        if self.config.max_routing_count.map_or(false, |max| self.size >= max.get()) {
+            return false;
+        }
         let index = self.get_bucket_index(id);
-        self.nodes[index.0]
+        let inserted = self.nodes[index.0]
             .buckets[index.1]
-            .insert(id, &self.config, contacter)
+            .insert(id, &self.config, contacter);
+
+        if inserted {
+            self.size += 1;
+        }
+        inserted
     }
 
-    pub fn remove(&mut self, id: Id) {
-        self.get_bucket_mut(id).remove(id)
+    pub fn remove(&mut self, id: Id) -> bool {
+        let removed = self.get_bucket_mut(id).remove(id);
+        if removed {
+            self.size -= 1;
+        }
+        removed
     }
 
     pub fn refresh(&mut self, id: Id) -> bool {
@@ -214,20 +229,9 @@ impl NodeAggregator {
 mod tests {
     use std::{collections::HashMap, future, sync::{Arc, Mutex, MutexGuard}};
 
-    use crate::{consts::ID_LEN, transport::{Response, TransportError}};
+    use crate::transport::{Response, TransportError};
 
     use super::*;
-
-    impl Id {
-        pub fn from_hex(data: &str) -> Id {
-            let mut id = Id([0; ID_LEN]);
-            let r = hex::decode(data).unwrap();
-            for (i, r) in r.iter().rev().enumerate() {
-                id.0[id.0.len() - i - 1] = *r;
-            }
-            id
-        }
-    }
 
     #[derive(Clone)]
     struct IgnoreContacter;

@@ -1,6 +1,5 @@
 
 mod transport;
-mod share;
-mod simulate;
+pub mod simulate;
 
 pub use transport::*;

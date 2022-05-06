@@ -15,13 +15,13 @@ async fn resolve_nodes(contact: Arc<WrtcConnection>, conn: Arc<Connections>, ids
     // Contacts that will be queried
     let mut to_query = Vec::new();
     let old_contacts = {
-        let connections = conn.connection.lock().unwrap();
+        let connections = conn.connections.lock().unwrap();
         ids.into_iter().map(|id| {
             let x = connections.get(&id);
             if let None = x {
                 to_query.push(id)
             }
-            x.cloned().map(|x| WrtcContact(x))
+            x.cloned().map(|x| WrtcContact::Other(x))
         }).collect::<Vec<_>>()
     };
 
@@ -91,7 +91,6 @@ async fn resolve_nodes(contact: Arc<WrtcConnection>, conn: Arc<Connections>, ids
                 None
             }
         })
-        .map(|x| WrtcContact(x))
         .collect();
 
     // Piece back together old contacts and new contacts
@@ -134,7 +133,7 @@ impl TransportSender for WrtcSender {
         let root = self.0.clone();
         let id = *id;
         async move {
-            let contact = root.connection.lock().unwrap().get(&id)
+            let contact = root.connections.lock().unwrap().get(&id)
                 .ok_or(TransportError::ContactLost)?
                 .clone();
 
@@ -149,7 +148,11 @@ impl TransportSender for WrtcSender {
     }
 
     fn wrap_contact(&self, id: Id) -> Self::Contact {
-        WrtcContact(self.0.connection.lock().unwrap().get(&id)
+        if self.0.dht.upgrade().expect("Shutting down").id() == id {
+            return WrtcContact::SelfId(id);
+        }
+
+        WrtcContact::Other(self.0.connections.lock().unwrap().get(&id)
             .expect("Cannot find contact")
             .clone())
     }
@@ -159,11 +162,33 @@ impl TransportSender for WrtcSender {
 
 
 #[derive(Clone)]
-pub struct WrtcContact(Arc<WrtcConnection>);
+pub enum WrtcContact {
+    SelfId(Id),
+    Other(Arc<WrtcConnection>),
+}
+
+impl Drop for WrtcContact {
+    fn drop(&mut self) {
+        let parent = match self {
+            WrtcContact::SelfId(_) => return,
+            WrtcContact::Other(x) => x,
+        };
+
+        // this + connection's
+        if Arc::strong_count(parent) != 2 {
+            return
+        }
+
+        parent.on_contact_lost();
+    }
+}
 
 impl Contact for WrtcContact {
     fn id(&self) -> &Id {
-        &self.0.peer_id
+        match self {
+            WrtcContact::SelfId(x) => x,
+            WrtcContact::Other(x) => &x.peer_id,
+        }
     }
 }
 

@@ -48,7 +48,7 @@ impl KBucket {
         }
     }
 
-    pub fn remove(&mut self, id: Id) {
+    pub fn remove(&mut self, id: Id) -> bool {
         let i = self.entries.iter().position(|x| *x == id);
         if let Some(i) = i {
             self.entries.remove(i);
@@ -56,9 +56,13 @@ impl KBucket {
             if self.replacement_cache.len() > 0 {
                 self.entries.push(self.replacement_cache.remove(0));
             }
+            true
         } else {
             if let Some(i) = self.replacement_cache.iter().position(|x| *x == id) {
                 self.replacement_cache.remove(i);
+                true
+            } else {
+                false
             }
         }
     }
