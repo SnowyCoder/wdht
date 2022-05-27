@@ -49,6 +49,9 @@ struct ServerArgs {
 struct ClientArgs {
     #[clap(flatten)]
     common: CommonArgs,
+
+    #[clap(short = 'n', long, default_value="1")]
+    count: u32,
 }
 
 #[derive(Subcommand, Debug)]
@@ -82,7 +85,16 @@ async fn start_kademlia(args: &CommonArgs) -> Arc<KademliaDht<WrtcSender>> {
 }
 
 async fn start_client(args: &ClientArgs) {
-    let _kad = start_kademlia(&args.common).await;
+    let mut kads = Vec::new();
+    for i in 0..args.count {
+        println!("Starting: {i}");
+        kads.push(start_kademlia(&args.common).await);
+    }
+    /*let _kads = join_all(
+        (0..args.count).into_iter()
+        .map(|_| start_kademlia(&args.common))
+    ).await;*/
+    info!("Clients started");
 
     tokio::signal::ctrl_c().await.expect("Failed to listen to ctrl-c");
 }

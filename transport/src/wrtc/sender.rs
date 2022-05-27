@@ -1,14 +1,12 @@
 use core::future::Future;
 use std::{sync::Arc, fmt::{Debug, Formatter}};
-
-use futures::future::join_all;
-use log::{error, warn};
+use log::warn;
 use wdht_logic::{transport::{TransportSender, Request, RawResponse, TransportError, Contact}, Id};
 
 use super::{Connections, protocol::{WrtcRequest, WrtcResponse}, conn::WrtcConnection};
 
 
-async fn resolve_nodes(contact: Arc<WrtcConnection>, conn: Arc<Connections>, ids: Vec<Id>) -> Result<Vec<WrtcContact>, TransportError> {
+async fn resolve_nodes(referrer: Arc<WrtcConnection>, conn: &Arc<Connections>, ids: Vec<Id>) -> Result<Vec<WrtcContact>, TransportError> {
     // Collect old_contacts (contacts already known)
     // and contacts to query
     // old_contacts is a Vec<Option<WrtcContact>>, None elements are placeholders for
@@ -34,64 +32,7 @@ async fn resolve_nodes(contact: Arc<WrtcConnection>, conn: Arc<Connections>, ids
         );
     }
 
-    // Create N active connections
-    let offers = join_all(
-        (0..to_query.len())
-                .map(|_| conn.clone().create_active())
-    ).await;
-
-    // map each new offer to an id, this will return
-    // Vec<(id, offer)>, Vec<(answer_receiver, connection_receiver)>
-    let offers: (Vec<_>, Vec<_>) =
-        to_query.iter()
-        .zip(
-            offers.into_iter()
-                .filter_map(|x| {
-                    match x {
-                        Err(e) => {
-                            error!("Failed to create offer: {}", e);
-                            None
-                        }
-                        Ok(x) => Some(x),
-                    }
-                })
-        )
-        .map(|(id, x)| ((*id, x.0), (x.1, x.2)))
-        .unzip();
-    let res = contact.send_request(WrtcRequest::ForwardOffer(offers.0)).await?;
-
-    let res = match res {
-        WrtcResponse::ForwardAnswers(x) => x,
-        _ => return Err(TransportError::UnknownError("Invalid answer received".into()))
-    };
-
-    // Map back the received answers and wait for the channel creation to complete
-    let new_contacts: Vec<WrtcContact> = join_all(
-        // Zip our Vec<*answer_receiver, contact_receiver)> with the returned answers
-        offers.1.into_iter()
-            .zip(res)
-            .filter_map(|(recv, ans)| {
-                let ans = match ans {
-                    Ok(x ) => x,
-                    Err(x) => {
-                        warn!("Client responded with error: {}", x);
-                        return None;
-                    }
-                };
-                // Send the answer back to the receiver and return the contact future
-                let _ = recv.0.send(ans);
-                Some(recv.1)
-            })
-        ).await
-        .into_iter()
-        .filter_map(|x| match x {
-            Ok(x) => Some(x),
-            Err(e) => {
-                warn!("Signaling error {}", e);
-                None
-            }
-        })
-        .collect();
+    let new_contacts = conn.connector.connect_all(conn, referrer, to_query).await;
 
     // Piece back together old contacts and new contacts
     let mut new_contacts = new_contacts.into_iter();
@@ -100,7 +41,13 @@ async fn resolve_nodes(contact: Arc<WrtcConnection>, conn: Arc<Connections>, ids
         .filter_map(|x| {
             match x {
                 Some(x) => Some(x),
-                None => new_contacts.next(),
+                None => new_contacts.next().and_then(|x| match x {
+                    Ok(x) => Some(x),
+                    Err(e) => {
+                        warn!("Error connecting: {}", e);
+                        None
+                    }
+                }),
             }
         })
         .collect::<Vec<_>>();
@@ -111,7 +58,7 @@ async fn resolve_nodes(contact: Arc<WrtcConnection>, conn: Arc<Connections>, ids
 async fn translate_response(contact: Arc<WrtcConnection>, conn: Arc<Connections>, res: RawResponse<Id>) -> Result<RawResponse<WrtcContact>, TransportError> {
     use RawResponse::*;
     Ok(match res {
-        FoundNodes(nodes) => FoundNodes(resolve_nodes(contact, conn, nodes).await?),
+        FoundNodes(nodes) => FoundNodes(resolve_nodes(contact, &conn, nodes).await?),
         FoundData(x) => FoundData(x),
         Done => Done,
         Error => Error,
@@ -142,7 +89,7 @@ impl TransportSender for WrtcSender {
             match res {
                 Ok(WrtcResponse::Ans(x)) => translate_response(contact, root, x).await,
                 Ok(_) => Err(TransportError::UnknownError("Invalid response".into())),
-                Err(x) => Err(TransportError::UnknownError(x.to_string())),
+                Err(x) => Err(x.into()),
             }
         }
     }

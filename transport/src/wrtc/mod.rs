@@ -6,9 +6,10 @@ use once_cell::sync::Lazy;
 use tokio::sync::oneshot;
 use wdht_logic::{KademliaDht, Id, config::SystemConfig, transport::TransportListener};
 
-use self::{conn::{WrtcConnection, PeerMessageError}, async_wrtc::{WrtcError, ConnectionRole, WrtcChannel}};
+use self::{conn::{WrtcConnection, PeerMessageError}, async_wrtc::{WrtcError, ConnectionRole, WrtcChannel}, connector::WrtcConnector};
 
 mod conn;
+mod connector;
 mod protocol;
 pub mod async_wrtc;
 mod sender;
@@ -25,6 +26,7 @@ pub struct Connections {
     pub connections: Mutex<HashMap<Id, Arc<WrtcConnection>>>,
     half_closed_connections: Mutex<VecDeque<Id>>,
     half_closed_count: AtomicU64,
+    pub connector: WrtcConnector,
 }
 
 static RTC_CONFIG: Lazy<RtcConfig> = Lazy::new(|| {
@@ -45,6 +47,7 @@ impl Connections {
                 connection_count: AtomicU64::new(0),
                 half_closed_count: AtomicU64::new(0),
                 half_closed_connections: Mutex::new(VecDeque::new()),
+                connector: Default::default(),
             });
             let sender = WrtcSender(connections);
 

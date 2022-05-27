@@ -1,4 +1,4 @@
-use std::{future::Future, fmt::Debug};
+use std::{future::Future, fmt::Debug, borrow::Cow};
 
 #[cfg(feature = "serde")]
 use serde::{Serialize, Deserialize};
@@ -110,5 +110,17 @@ pub enum TransportError {
     ContactLost,
 
     #[error("Unknown transport error {0}")]
-    UnknownError(String),
+    UnknownError(Cow<'static, str>),
+}
+
+impl From<&'static str> for TransportError {
+    fn from(x: &'static str) -> Self {
+        TransportError::UnknownError(Cow::Borrowed(x))
+    }
+}
+
+impl From<String> for TransportError {
+    fn from(x: String) -> Self {
+        TransportError::UnknownError(Cow::Owned(x))
+    }
 }

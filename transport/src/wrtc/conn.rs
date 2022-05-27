@@ -69,7 +69,7 @@ pub async fn handshake_active(conn: &mut WrtcChannel, id: Id) -> Result<Id, Peer
     conn.data_channel.send(&msg)
         .map_err(|_| WrtcError::ConnectionLost)?;
 
-    info!("Waiting for handshake response...");
+    debug!("Waiting for handshake response...");
     let msg = conn.listener.recv().await
         .ok_or(WrtcError::ConnectionLost)??;
     let res = serde_json::from_slice::<HandshakeResponse>(&msg)?;
@@ -121,7 +121,7 @@ impl InnerWrtcConnection {
         let data = serde_json::to_vec(&message).expect("Failed to serialize");
         if let Err(_err) = self.channel.send(&data) {
             self.responses.remove(&message.id)
-                .map(|x| x.send(Err(TransportError::UnknownError("Failed to send message".to_string()))));
+                .map(|x| x.send(Err("Failed to send message".into())));
         }
 
         recv
@@ -242,7 +242,7 @@ impl WrtcConnection {
         } else {
             self.parent.upgrade().map(|x| x.on_half_closed(self.peer_id));
             if let Err(x) = self.send_half_close() {
-                warn!("Failed to send half-close {}", x);
+                warn!("Failed to send half-close: {}", x);
             }
         }
     }
