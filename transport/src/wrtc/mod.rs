@@ -1,7 +1,7 @@
 use std::{sync::{Mutex, Arc, Weak, atomic::{AtomicU64, Ordering}}, collections::{HashMap, VecDeque}, num::NonZeroU64};
 
 use datachannel::{RtcConfig, SessionDescription};
-use log::{info, error, warn, debug};
+use tracing::{info, error, warn, debug};
 use once_cell::sync::Lazy;
 use tokio::sync::oneshot;
 use wdht_logic::{KademliaDht, Id, config::SystemConfig, transport::TransportListener};
@@ -64,12 +64,12 @@ impl Connections {
         let id = match res {
             Ok(x) => x,
             Err(x) => {
-                log::warn!("Handshake error {}", x);
+                warn!("Handshake error {}", x);
                 self.connection_count.fetch_sub(1, Ordering::SeqCst);
                 return;
             }
         };
-        info!("{} connected", id);
+        debug!("{} connected", id);
         let connection = conn::WrtcConnection::new(id, channel, Arc::downgrade(&self));
 
         self.connections.lock().unwrap().insert(id, connection.clone());
@@ -165,7 +165,7 @@ impl Connections {
             },
             Err(x) => {
                 this.connection_count.fetch_sub(1, Ordering::SeqCst);
-                log::debug!("Error opening connection {}", x);
+                debug!("Error opening connection {}", x);
                 return;
             },
         };
@@ -182,7 +182,9 @@ impl Connections {
         drop(self);
 
         let role = ConnectionRole::Passive(offer);
-        tokio::spawn(Self::create_channel_and_register(this.clone(), role, answer_tx, false, None));
+        tokio::spawn(
+            Self::create_channel_and_register(this.clone(), role, answer_tx, false, None)
+        );
 
         debug!("Waiting for passive answer...");
         answer_rx.await.map_err(|_| {

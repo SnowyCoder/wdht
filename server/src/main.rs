@@ -1,6 +1,7 @@
 use std::{net::SocketAddr, sync::Arc, num::NonZeroU64};
 
-use log::info;
+use tracing::{info, span, Level, Instrument};
+use tracing_subscriber::{prelude::*, EnvFilter};
 use rand::{thread_rng, Rng};
 use reqwest::Url;
 use wdht_logic::{Id, KademliaDht, config::SystemConfig};
@@ -62,7 +63,12 @@ enum Command {
 
 #[tokio::main]
 async fn main() {
-    env_logger::init();
+    let console_layer = console_subscriber::ConsoleLayer::builder().spawn();
+    let fmt_layer = tracing_subscriber::fmt::layer();
+    tracing_subscriber::registry()
+        .with(console_layer)
+        .with(fmt_layer.with_filter(EnvFilter::from_default_env()))
+        .init();
 
     let args = CliArgs::parse();
 
@@ -74,26 +80,27 @@ async fn main() {
 
 async fn start_kademlia(args: &CommonArgs) -> Arc<KademliaDht<WrtcSender>> {
     let id = args.id.unwrap_or_else(|| thread_rng().gen());
-    info!("Id: {}", id);
-    info!("Bootstrap: {:?}", args.bootstrap);
+
 
     let mut config: SystemConfig = Default::default();
     config.routing.max_connections = args.max_connections;
     config.routing.max_routing_count = args.max_routing_count;
 
-    create_dht(config, id, args.bootstrap.clone()).await
+    let span = span!(Level::INFO, "create_dht", %id);
+    create_dht(config, id, args.bootstrap.clone())
+        .instrument(span).await
 }
 
 async fn start_client(args: &ClientArgs) {
-    let mut kads = Vec::new();
+    /*let mut kads = Vec::new();
     for i in 0..args.count {
         println!("Starting: {i}");
         kads.push(start_kademlia(&args.common).await);
-    }
-    /*let _kads = join_all(
+    }*/
+    let _kads = futures::future::join_all(
         (0..args.count).into_iter()
         .map(|_| start_kademlia(&args.common))
-    ).await;*/
+    ).await;
     info!("Clients started");
 
     tokio::signal::ctrl_c().await.expect("Failed to listen to ctrl-c");

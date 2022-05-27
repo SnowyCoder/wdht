@@ -2,7 +2,7 @@ use core::fmt;
 use std::{sync::{Arc, Mutex, Weak}, collections::{HashMap, HashSet, hash_map::Entry}, fmt::Write};
 
 use futures::Future;
-use log::{debug, trace};
+use tracing::{debug, trace};
 use tokio::sync::{mpsc, oneshot, broadcast, Barrier};
 
 use crate::{transport::{TransportSender, Response, Request, TransportError, TransportListener, Contact, RawResponse}, Id, KademliaDht, config::SystemConfig};
@@ -381,21 +381,14 @@ mod tests {
     use itertools::Itertools;
     use log::info;
     use rand::{prelude::{StdRng, SliceRandom}, SeedableRng, Rng};
+    use test_log;
 
     use crate::search::BasicSearchOptions;
 
     use super::*;
 
-    fn init() {
-        let _ = env_logger::builder()
-            .is_test(true)
-            .try_init();
-    }
-
-    #[tokio::test]
+    #[test_log::test(tokio::test)]
     async fn simulate_simple() {
-        init();
-
         let (killswitch, shutdown) = broadcast::channel(1);
 
         let config: SystemConfig = Default::default();
@@ -434,10 +427,8 @@ mod tests {
     }
 
 
-
-    #[tokio::test]
+    #[test_log::test(tokio::test)]
     async fn simulate_10() {
-        init();
 
         let (killswitch, _shutdown) = broadcast::channel(1);
 
@@ -515,10 +506,9 @@ mod tests {
     /// Very expensive test that simulates 100k nodes
     /// takes around 3GiB and (in my crappy laptop) ~5 minutes.
     /// It'd be better to use somewhat parallel bootstrapping.
-    #[tokio::test]
+    #[test_log::test(tokio::test)]
     #[ignore]// Intensive test
     async fn simulate_100k() {
-        init();
         let mut rng = StdRng::seed_from_u64(0x123456789abcdef0);
 
         let (killswitch, _shutdown) = broadcast::channel(1);

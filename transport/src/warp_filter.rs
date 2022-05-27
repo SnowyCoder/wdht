@@ -1,10 +1,12 @@
 use std::sync::Arc;
 
+use tracing::instrument;
 use warp::{cors, Filter};
 use wdht_logic::KademliaDht;
 
 use crate::{wrtc::{WrtcSender, async_wrtc::WrtcError}, http_api::{ConnectRequest, ConnectResponse}};
 
+#[instrument(level = "error", name = "http_kademlia", skip_all, fields(kad_id = %dht.id()))]
 async fn dht_connect_handle(dht: Arc<KademliaDht<WrtcSender>>, req: ConnectRequest) -> ConnectResponse<'static> {
     match dht.transport().0.clone().create_passive(req.offer).await {
         Ok(x) => ConnectResponse::Ok {

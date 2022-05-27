@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::{Arc, Mutex}, iter};
 
 use datachannel::SessionDescription;
 use futures::future::join_all;
-use log::{error, warn};
+use tracing::{error, warn};
 use tokio::sync::{broadcast, oneshot};
 use wdht_logic::{Id, transport::TransportError};
 

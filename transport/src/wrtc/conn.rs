@@ -2,7 +2,7 @@ use std::{borrow::Cow, collections::HashMap, sync::{Weak, Mutex, Arc}, time::Dur
 
 use datachannel::RtcDataChannel;
 use futures::future::join_all;
-use log::{warn, debug, info};
+use tracing::{warn, debug, info, Instrument, span, Level};
 use serde::Serialize;
 use thiserror::Error;
 use tokio::{sync::{oneshot, mpsc}, time::timeout};
@@ -147,6 +147,7 @@ pub struct WrtcConnection {
 
 impl WrtcConnection {
     pub fn new(peer_id: Id, channel: WrtcChannel, parent: Weak<Connections>) -> Arc<Self> {
+        let kad_id = parent.upgrade().unwrap().dht.upgrade().unwrap().id();
         let WrtcChannel {
             peer_connection,
             data_channel,
@@ -166,7 +167,10 @@ impl WrtcConnection {
             parent,
         });
 
-        tokio::spawn(connection_listen(listener, Arc::downgrade(&res)));
+        tokio::spawn(
+            connection_listen(listener, Arc::downgrade(&res))
+            .instrument(span!(parent: None, Level::INFO, "kad_listener_wrtc", %kad_id, peer_id=%peer_id))
+        );
         res
     }
 

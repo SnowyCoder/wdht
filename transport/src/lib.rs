@@ -4,7 +4,7 @@ use std::{sync::Arc, error::Error, fmt::Display};
 
 use futures::future::join_all;
 use http_api::{ConnectResponse, ConnectRequest};
-use log::info;
+use tracing::info;
 use reqwest::IntoUrl;
 use wdht_logic::{config::SystemConfig, KademliaDht, Id, search::BasicSearchOptions};
 use wrtc::{WrtcSender, Connections};

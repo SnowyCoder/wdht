@@ -1,7 +1,7 @@
 use std::{sync::{RwLock, Mutex}, time::Duration};
 
 use futures::{stream::FuturesUnordered, StreamExt};
-use log::{error, debug, info, warn};
+use tracing::{error, debug, info, warn, instrument, event, Level};
 use rand::Rng;
 
 use crate::{ktree::KTree, config::SystemConfig, transport::{TransportSender, Request, Response, TransportListener, RawResponse, Contact}, id::Id, storage::Storage, search::{BasicSearch, BasicSearchOptions, SearchType, SearchResult}};
@@ -150,20 +150,22 @@ impl<T: TransportSender> KademliaDht<T> {
 
 impl<T: TransportSender> TransportListener for KademliaDht<T> {
     fn on_connect(&self, id: Id) -> bool {
-        info!("{:?}: Connnected {:?}", self.id, id);
+        event!(Level::INFO, kad_id=%self.id, "Connnected {id}");
         self.tree.lock()
             .unwrap()
             .insert(id, &self.transport)
     }
 
     fn on_disconnect(&self, id: Id) {
+        event!(Level::INFO, kad_id=%self.id, "Disconnected {id}");
         self.tree.lock()
             .unwrap()
             .remove(id);
     }
 
+    #[instrument(skip(self), fields(kad_id=%self.id, %sender))]
     fn on_request(&self, sender: Id, message: Request) -> Response {
-        debug!("{:?} Request from {:?}: {:?}", self.id(), sender, message);
+        debug!("Request: {:?}", message);
         let mut tree = self.tree.lock().unwrap();
         tree.refresh(sender);
 

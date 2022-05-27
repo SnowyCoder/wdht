@@ -4,7 +4,7 @@ pub use datachannel::{ConnectionState, IceCandidate, RtcConfig, SessionDescripti
 use datachannel::{DataChannelHandler, PeerConnectionHandler, RtcDataChannel, RtcPeerConnection, DataChannelInit, SdpType, GatheringState, SignalingState};
 use thiserror::Error;
 use tokio::sync::{oneshot, mpsc::{self, error::TrySendError}};
-use log::{debug, error, info};
+use tracing::{debug, error, info};
 
 #[derive(Error, Debug)]
 pub enum WrtcError {

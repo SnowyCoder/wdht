@@ -1,6 +1,6 @@
 use std::{collections::{HashMap, BinaryHeap}, time::{Instant, Duration}};
 
-use log::info;
+use tracing::info;
 use thiserror::Error;
 
 use crate::{id::Id, config::StorageConfig};

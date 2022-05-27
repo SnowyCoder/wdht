@@ -1,6 +1,6 @@
 use core::future::Future;
 use std::{sync::Arc, fmt::{Debug, Formatter}};
-use log::warn;
+use tracing::warn;
 use wdht_logic::{transport::{TransportSender, Request, RawResponse, TransportError, Contact}, Id};
 
 use super::{Connections, protocol::{WrtcRequest, WrtcResponse}, conn::WrtcConnection};

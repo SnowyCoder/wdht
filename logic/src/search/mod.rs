@@ -2,7 +2,7 @@ use std::{collections::HashSet, cmp::Reverse, iter};
 
 use futures::stream::FuturesUnordered;
 use futures::prelude::*;
-use log::{warn, debug};
+use tracing::{warn, debug, instrument};
 
 use crate::{transport::{TransportSender, RawResponse, TransportError, Request, Contact}, Id, KademliaDht};
 
@@ -89,6 +89,7 @@ impl<'a, T: TransportSender> BasicSearch<'a, T> {
         bucket.sort_by_key(|x| Reverse((*x.1.id() ^ *self.target_id.id()).leading_zeros()));
     }
 
+    #[instrument(skip(self))]
     pub async fn search(&self, first_bucket: Vec<T::Contact>) -> SearchResult<T::Contact> {
         let bucket_size = self.dht.config().routing.bucket_size;
         let parallelism = self.options.parallelism;
