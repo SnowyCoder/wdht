@@ -1,12 +1,13 @@
 use std::{sync::{Mutex, Arc, Weak, atomic::{AtomicU64, Ordering}}, collections::{HashMap, VecDeque}, num::NonZeroU64};
 
 use datachannel::{RtcConfig, SessionDescription};
-use tracing::{info, error, warn, debug};
+use tracing::{info, error, warn, debug, event, Level};
 use once_cell::sync::Lazy;
 use tokio::sync::oneshot;
-use wdht_logic::{KademliaDht, Id, config::SystemConfig, transport::TransportListener};
+use async_broadcast as broadcast;
+use wdht_logic::{KademliaDht, Id, config::SystemConfig, transport::{TransportListener, TransportError}};
 
-use self::{conn::{WrtcConnection, PeerMessageError}, async_wrtc::{WrtcError, ConnectionRole, WrtcChannel}, connector::WrtcConnector};
+use self::{conn::{WrtcConnection, PeerMessageError}, async_wrtc::{WrtcError, ConnectionRole, WrtcChannel}, connector::{WrtcConnector, CreatingConnectionSender, ContactResult}};
 
 mod conn;
 mod connector;
@@ -26,12 +27,12 @@ pub struct Connections {
     pub connections: Mutex<HashMap<Id, Arc<WrtcConnection>>>,
     half_closed_connections: Mutex<VecDeque<Id>>,
     half_closed_count: AtomicU64,
-    pub connector: WrtcConnector,
+    pub connector: Arc<WrtcConnector>,
 }
 
 static RTC_CONFIG: Lazy<RtcConfig> = Lazy::new(|| {
     // TODO: have more STUN servers.
-    let mut config = RtcConfig::new(&["stun1.l.google.com:19302",]);
+    let mut config = RtcConfig::new(&["stun://localhost:3478",]);
     config.disable_auto_negotiation = true;
     config
 });
@@ -47,7 +48,7 @@ impl Connections {
                 connection_count: AtomicU64::new(0),
                 half_closed_count: AtomicU64::new(0),
                 half_closed_connections: Mutex::new(VecDeque::new()),
-                connector: Default::default(),
+                connector: Arc::new(WrtcConnector::new(id)),
             });
             let sender = WrtcSender(connections);
 
@@ -59,29 +60,40 @@ impl Connections {
         self: Arc<Self>,
         channel: WrtcChannel,
         res: Result<Id, PeerMessageError>,
-        conn_tx: Option<oneshot::Sender<WrtcContact>>
+        conn_tx: CreatingConnectionSender
     ) {
         let id = match res {
             Ok(x) => x,
             Err(x) => {
                 warn!("Handshake error {}", x);
+                conn_tx.send(Err(TransportError::HandshakeError));
                 self.connection_count.fetch_sub(1, Ordering::SeqCst);
                 return;
             }
         };
+        if !conn_tx.is_last() {
+            conn_tx.send(Err("Already connecting".into()));
+            self.connection_count.fetch_sub(1, Ordering::SeqCst);
+            return;
+        }
         debug!("{} connected", id);
         let connection = conn::WrtcConnection::new(id, channel, Arc::downgrade(&self));
 
-        self.connections.lock().unwrap().insert(id, connection.clone());
+        {
+            let mut conns = self.connections.lock().unwrap();
+            if conns.contains_key(&id) {
+                event!(Level::ERROR, kad_id=%self.self_id, "Same id connection conflict!");
+                return;
+            }
+            conns.insert(id, connection.clone());
+        }
         self.dht.upgrade()
             .map(|x| {
                 // Inform the connection that it's used in the routing table
                 connection.set_dont_cleanup(x.on_connect(id));
             });
         let connection = WrtcContact::Other(connection);
-        if let Some(listener) = conn_tx {
-            let _ = listener.send(connection);
-        }
+        conn_tx.send(Ok(connection));
     }
 
     fn alloc_connection(self: &Arc<Self>) -> bool {
@@ -145,7 +157,7 @@ impl Connections {
         role: ConnectionRole,
         answer_tx: oneshot::Sender<SessionDescription>,
         is_active: bool,
-        conn_tx: Option<oneshot::Sender<WrtcContact>>
+        conn_tx: CreatingConnectionSender
     ) {
         let channel = async_wrtc::create_channel(&RTC_CONFIG, role, answer_tx).await;
 
@@ -165,13 +177,18 @@ impl Connections {
             },
             Err(x) => {
                 this.connection_count.fetch_sub(1, Ordering::SeqCst);
+                conn_tx.send(Err(format!("{}", x).into()));
                 debug!("Error opening connection {}", x);
-                return;
             },
         };
     }
 
-    pub async fn create_passive(self: Arc<Self>, offer: SessionDescription) -> Result<SessionDescription, WrtcError> {
+    pub async fn create_passive(self: Arc<Self>, id: Id, offer: SessionDescription) -> Result<(SessionDescription, broadcast::Receiver<ContactResult>), WrtcError> {
+        let (conn_tx, conn_rx) = self.connector.create_passive(id);
+        let conn_tx = match conn_tx {
+            Some(x) => x,
+            None => return Err(WrtcError::AlreadyConnecting),
+        };
         if !self.alloc_connection() {
             info!("Cannot create passive connection: connection limit reached");
             return Err(WrtcError::ConnectionLimitReached);
@@ -183,35 +200,49 @@ impl Connections {
 
         let role = ConnectionRole::Passive(offer);
         tokio::spawn(
-            Self::create_channel_and_register(this.clone(), role, answer_tx, false, None)
+            Self::create_channel_and_register(this.clone(), role, answer_tx, false, conn_tx)
         );
 
         debug!("Waiting for passive answer...");
-        answer_rx.await.map_err(|_| {
-            this.upgrade().map(|x| x.connection_count.fetch_sub(1, Ordering::SeqCst));
-            WrtcError::SignalingFailed
-        })
+        answer_rx.await
+            .map(|x| (x, conn_rx))
+            .map_err(|_| {
+                this.upgrade().map(|x| x.connection_count.fetch_sub(1, Ordering::SeqCst));
+                WrtcError::SignalingFailed
+            })
     }
 
-    pub async fn create_active(self: Arc<Self>) -> Result<(SessionDescription, oneshot::Sender<SessionDescription>, oneshot::Receiver<WrtcContact>), WrtcError> {
+    pub async fn create_active_with_connector(self: Arc<Self>, sender: CreatingConnectionSender) -> Result<(SessionDescription, oneshot::Sender<Result<SessionDescription, WrtcError>>), WrtcError> {
         if !self.alloc_connection() {
             return Err(WrtcError::ConnectionLimitReached);
         }
 
         let (answer_tx, answer_rx) = oneshot::channel();
         let (offer_tx, offer_rx) = oneshot::channel();
-        let (conn_tx, conn_rx) = oneshot::channel();
 
         let this = Arc::downgrade(&self);
         drop(self);
 
         let role = ConnectionRole::Active(answer_rx);
-        tokio::spawn(Self::create_channel_and_register(this.clone(), role, offer_tx, true, Some(conn_tx)));
+        tokio::spawn(Self::create_channel_and_register(this.clone(), role, offer_tx, true, sender));
 
         let offer = offer_rx.await.map_err(|_| {
             this.upgrade().map(|x| x.connection_count.fetch_sub(1, Ordering::SeqCst));
             WrtcError::SignalingFailed
         })?;
+        Ok((offer, answer_tx))
+    }
+
+    pub async fn create_active(self: Arc<Self>, id: Option<Id>) -> Result<(SessionDescription, oneshot::Sender<Result<SessionDescription, WrtcError>>, broadcast::Receiver<ContactResult>), WrtcError> {
+        let (conn_tx, conn_rx) = match id {
+            Some(id) => match self.connector.create_active(id) {
+                (Some(sender), chan) => (sender, chan),
+                (None, _) => return Err(WrtcError::AlreadyConnecting),
+            },
+            None => self.connector.create_unknown(),
+        };
+
+        let (offer, answer_tx) = self.create_active_with_connector(conn_tx).await?;
         Ok((offer, answer_tx, conn_rx))
     }
 

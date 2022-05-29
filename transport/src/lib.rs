@@ -1,5 +1,4 @@
 #![feature(type_alias_impl_trait)]
-
 use std::{sync::Arc, error::Error, fmt::Display};
 
 use futures::future::join_all;
@@ -16,10 +15,12 @@ pub mod warp_filter;
 
 
 async fn bootstrap_connect<T: IntoUrl>(url: T, connector: Arc<Connections>) -> Result<(), Box<dyn Error>> {
-    let (offer, answer_tx, connection_rx) = connector.create_active().await?;
+    let self_id = connector.self_id;
+    let (offer, answer_tx, mut connection_rx) = connector.create_active(None).await?;
 
     let client = reqwest::Client::new();
     let offer = ConnectRequest {
+        id: self_id,
         offer
     };
     let r: ConnectResponse = client.post(url)
@@ -32,11 +33,11 @@ async fn bootstrap_connect<T: IntoUrl>(url: T, connector: Arc<Connections>) -> R
         ConnectResponse::Ok { answer } => answer,
         ConnectResponse::Error { description } => return Err(description.into()),
     };
-    if let Err(_) = answer_tx.send(ans) {
+    if let Err(_) = answer_tx.send(Ok(ans)) {
         return Err("Failed to send answer".into());
     }
 
-    let x = connection_rx.await?;
+    let x = connection_rx.recv().await?;
     info!("Connected to: {:?}", x);
     Ok(())
 }

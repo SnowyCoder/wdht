@@ -8,6 +8,7 @@ use wdht_logic::{Id, KademliaDht, config::SystemConfig};
 use wdht_transport::{warp_filter::dht_connect, create_dht, wrtc::WrtcSender};
 
 use clap::{Parser, Subcommand, Args};
+use itertools::Itertools;
 
 /// Web-dht server (and tester client)
 #[derive(Parser, Debug)]
@@ -19,10 +20,6 @@ struct CliArgs {
 
 #[derive(Args, Debug)]
 struct CommonArgs {
-    /// Node ID (default is random)
-    #[clap(long)]
-    id: Option<Id>,
-
     /// HTTP Bootstrap servers
     #[clap(long)]
     bootstrap: Vec<Url>,
@@ -41,6 +38,10 @@ struct ServerArgs {
     #[clap(flatten)]
     common: CommonArgs,
 
+    /// Node ID (default is random)
+    #[clap(long)]
+    id: Option<Id>,
+
     /// Bind address
     #[clap(long, default_value = "127.0.0.1:3141")]
     bind: SocketAddr,
@@ -53,6 +54,10 @@ struct ClientArgs {
 
     #[clap(short = 'n', long, default_value="1")]
     count: u32,
+
+    /// Nodes ID (default is random)
+    #[clap(long, multiple_values(true), multiple_occurrences(false))]
+    ids: Vec<Id>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -78,8 +83,8 @@ async fn main() {
     }
 }
 
-async fn start_kademlia(args: &CommonArgs) -> Arc<KademliaDht<WrtcSender>> {
-    let id = args.id.unwrap_or_else(|| thread_rng().gen());
+async fn start_kademlia(args: &CommonArgs, id: Option<Id>) -> Arc<KademliaDht<WrtcSender>> {
+    let id = id.unwrap_or_else(|| thread_rng().gen());
 
 
     let mut config: SystemConfig = Default::default();
@@ -99,7 +104,8 @@ async fn start_client(args: &ClientArgs) {
     }*/
     let _kads = futures::future::join_all(
         (0..args.count).into_iter()
-        .map(|_| start_kademlia(&args.common))
+        .zip_longest(args.ids.clone())
+        .map(|x| start_kademlia(&args.common, x.right()))
     ).await;
     info!("Clients started");
 
@@ -107,7 +113,7 @@ async fn start_client(args: &ClientArgs) {
 }
 
 async fn start_server(args: &ServerArgs) {
-    let kad = start_kademlia(&args.common).await;
+    let kad = start_kademlia(&args.common, args.id).await;
     info!("Starting up server");
 
     warp::serve(dht_connect(kad))

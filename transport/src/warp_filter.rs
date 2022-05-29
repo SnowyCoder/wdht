@@ -8,9 +8,9 @@ use crate::{wrtc::{WrtcSender, async_wrtc::WrtcError}, http_api::{ConnectRequest
 
 #[instrument(level = "error", name = "http_kademlia", skip_all, fields(kad_id = %dht.id()))]
 async fn dht_connect_handle(dht: Arc<KademliaDht<WrtcSender>>, req: ConnectRequest) -> ConnectResponse<'static> {
-    match dht.transport().0.clone().create_passive(req.offer).await {
-        Ok(x) => ConnectResponse::Ok {
-            answer: x,
+    match dht.transport().0.clone().create_passive(req.id, req.offer).await {
+        Ok((answer, _)) => ConnectResponse::Ok {
+            answer,
         },
         Err(WrtcError::ConnectionLimitReached) => ConnectResponse::Error {
             description: "Connection limit reached".into(),

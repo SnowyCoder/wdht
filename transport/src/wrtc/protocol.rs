@@ -26,7 +26,7 @@ pub enum HandshakeResponse {
 pub enum WrtcRequest {
     Req(Request),
     ForwardOffer(Vec<(Id, WrtcOffer)>),
-    TryOffer(WrtcOffer),
+    TryOffer(Id, WrtcOffer),
     // Sent when the sender signals that he doesn't need the connection
     // anymore, if the other peer doesn't need the connection too he can close it
     // without any consequences. The sender should still try to keep the connection open

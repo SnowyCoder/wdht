@@ -89,7 +89,7 @@ impl<'a, T: TransportSender> BasicSearch<'a, T> {
         bucket.sort_by_key(|x| Reverse((*x.1.id() ^ *self.target_id.id()).leading_zeros()));
     }
 
-    #[instrument(skip(self))]
+    #[instrument(skip_all)]
     pub async fn search(&self, first_bucket: Vec<T::Contact>) -> SearchResult<T::Contact> {
         let bucket_size = self.dht.config().routing.bucket_size;
         let parallelism = self.options.parallelism;

@@ -1,12 +1,13 @@
-use std::sync::{Arc, Mutex, Weak};
+use std::{sync::{Arc, Mutex, Weak}, borrow::Cow};
 
 pub use datachannel::{ConnectionState, IceCandidate, RtcConfig, SessionDescription};
 use datachannel::{DataChannelHandler, PeerConnectionHandler, RtcDataChannel, RtcPeerConnection, DataChannelInit, SdpType, GatheringState, SignalingState};
 use thiserror::Error;
 use tokio::sync::{oneshot, mpsc::{self, error::TrySendError}};
 use tracing::{debug, error, info};
+use wdht_logic::transport::TransportError;
 
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Clone)]
 pub enum WrtcError {
     #[error("DataChannel error {0}")]
     DataChannelError(String),
@@ -16,13 +17,27 @@ pub enum WrtcError {
     SignalingFailed,
     #[error("Invalid session description")]
     InvalidDescription,
+    #[error("Invalid message received")]
+    InvalidMessage,
     #[error("Connection limit reached")]
     ConnectionLimitReached,
+    #[error("Already connecting to that id")]
+    AlreadyConnecting,
+    #[error("Transport error: {0}")]
+    Transport(TransportError),
+    #[error("Unknown error: {0}")]
+    UnknownError(Cow<'static, str>),
+}
+
+impl<T: Into<Cow<'static, str>>> From<T> for WrtcError {
+    fn from(x: T) -> Self {
+        WrtcError::UnknownError(x.into())
+    }
 }
 
 pub enum ConnectionRole {
     // Active: sends offer and awaits an answer
-    Active(oneshot::Receiver<SessionDescription>),
+    Active(oneshot::Receiver<Result<SessionDescription, WrtcError>>),
     // Passive: receives an offer, sends an answer back
     Passive(SessionDescription),
 }
@@ -52,7 +67,7 @@ pub async fn create_channel(config: &RtcConfig, role: ConnectionRole, answer: on
             ConnectionRole::Active(answer_rx) => {
                 conn.lock().unwrap().set_local_description(SdpType::Offer)
                     .expect("Error setting local description");
-                let answer = answer_rx.await.map_err(|_| WrtcError::SignalingFailed)?;
+                let answer = answer_rx.await.map_err(|_| WrtcError::SignalingFailed)??;
                 conn.lock().unwrap().set_remote_description(&answer)
             },
             ConnectionRole::Passive(offer) => {

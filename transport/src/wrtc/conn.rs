@@ -127,16 +127,21 @@ impl InnerWrtcConnection {
         recv
     }
 
-    pub fn send_response(&mut self, id: u32, res: WrtcResponse) {
+    pub fn send_response(&mut self, id: u32, res: WrtcResponse) -> Result<(), ()> {
         let message = WrtcMessage {
             id,
             payload: WrtcPayload::Res(res),
         };
 
         debug!("Send: {:?}", message);
-        // TODO: better error management
         let data = serde_json::to_vec(&message).expect("Failed to serialize");
-        self.channel.send(&data).expect("Failed to send message to channel");
+        match self.channel.send(&data) {
+            Err(x) => {
+                warn!("Failed to send message: {}", x);
+                Err(())
+            }
+            Ok(_) => Ok(()),
+        }
     }
 }
 pub struct WrtcConnection {
@@ -194,7 +199,7 @@ impl WrtcConnection {
                     Some(x) => x,
                     None => return Err(TransportError::ConnectionLost),
                 };
-                this.shutdown();
+                this.shutdown("Timeout expired");
                 // TODO: Destroy connection
                 Err(TransportError::ConnectionLost)
             },
@@ -202,11 +207,13 @@ impl WrtcConnection {
     }
 
     fn send_response(&self, id: u32, res: WrtcResponse) {
-        self.inner.lock().unwrap().send_response(id, res)
+        if self.inner.lock().unwrap().send_response(id, res).is_err() {
+            self.shutdown("Failed to send message");
+        }
     }
 
-    fn shutdown(self: &Arc<Self>) {
-        debug!("Shutting down connection");
+    fn shutdown(&self, reason: &'static str) {
+        debug!("Shutting down connection: {reason}");
         let parent = match self.parent.upgrade() {
             Some(x) => x,
             None => return,
@@ -217,12 +224,10 @@ impl WrtcConnection {
         self.shutdown_local();
     }
 
-    pub(crate) fn shutdown_local(self: &Arc<Self>) {
-        {
-            let mut inner = self.inner.lock().unwrap();
-            for (_id, resp) in inner.responses.drain() {
-                let _ = resp.send(Err(TransportError::ConnectionLost));
-            }
+    pub(crate) fn shutdown_local(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        for (_id, resp) in inner.responses.drain() {
+            let _ = resp.send(Err(TransportError::ConnectionLost));
         }
     }
 
@@ -237,12 +242,14 @@ impl WrtcConnection {
             if inner.dont_cleanup {
                 return;// Can't close this half, it's used in the routing table
             }
-            inner.this_half_closed = true;
+            if !inner.other_half_closed {
+                // Don't set this half closed, we're closing the connection instantly
+                inner.this_half_closed = true;
+            }
             inner.other_half_closed
         };
         if other_half_closed {
-            info!("Closing connection (both halfes closed)");
-            self.shutdown();
+            self.shutdown("Both halfes closed (sent)");
         } else {
             self.parent.upgrade().map(|x| x.on_half_closed(self.peer_id));
             if let Err(x) = self.send_half_close() {
@@ -281,18 +288,18 @@ fn process_message(msg: &[u8], conn: Arc<WrtcConnection>) -> Result<(), PeerMess
                 None => return Ok(()),// Shutting down
             };
             let ans = dht.on_request(conn.peer_id, x);
-            let mut inner = conn.inner.lock().unwrap();
-            inner.send_response(msg.id, WrtcResponse::Ans(ans));
+            conn.send_response(msg.id, WrtcResponse::Ans(ans));
         },
         WrtcRequest::ForwardOffer(offers) => {
             let connections = root.connections.lock().unwrap();
             let fut = join_all(offers.into_iter()
                     .map(|(id, offer)| {
-                let conn = connections.get(&id).cloned();
-                async {
-                    match conn {
+                let oconn = connections.get(&id).cloned();
+                let peer_id = conn.peer_id;
+                async move {
+                    match oconn {
                         Some(x) => {
-                            match x.send_request(WrtcRequest::TryOffer(offer)).await {
+                            match x.send_request(WrtcRequest::TryOffer(peer_id, offer)).await {
                                 Ok(WrtcResponse::OkAnswer(x)) => x,
                                 Ok(_) => Err("peer_error".into()),
                                 Err(_) => Err("not_found".into()),
@@ -312,11 +319,16 @@ fn process_message(msg: &[u8], conn: Arc<WrtcConnection>) -> Result<(), PeerMess
                 connection.send_response(msg.id,WrtcResponse::ForwardAnswers(results));
             });
         },
-        WrtcRequest::TryOffer(offer) => {
+        WrtcRequest::TryOffer(id, offer) => {
+            if root.connections.lock().unwrap().contains_key(&id) {
+                conn.send_response(msg.id, WrtcResponse::OkAnswer(Err("already_connected".into())));
+                return Ok(());
+            }
+
             let weak_ptr = Arc::downgrade(&conn);
             tokio::spawn(async move {
-                let res = match root.create_passive(offer).await {
-                    Ok(x) => WrtcResponse::OkAnswer(Ok(x)),
+                let res = match root.create_passive(id, offer).await {
+                    Ok((desc, _)) => WrtcResponse::OkAnswer(Ok(desc)),
                     Err(x) => WrtcResponse::OkAnswer(Err(x.to_string())),
                 };
                 if let Some(x) = weak_ptr.upgrade() {
@@ -328,9 +340,8 @@ fn process_message(msg: &[u8], conn: Arc<WrtcConnection>) -> Result<(), PeerMess
             let mut inner = conn.inner.lock().unwrap();
             inner.other_half_closed = true;
             if inner.this_half_closed {
-                info!("Closing connection after half_close (both halfes closed)");
                 drop(inner);
-                conn.shutdown();
+                conn.shutdown("Both halfes closed (received)");
             }
         }
     }
@@ -358,6 +369,6 @@ async fn connection_listen(mut mex_rx: mpsc::Receiver<Result<Vec<u8>, WrtcError>
         }
     }
     if let Some(x) = conn.upgrade() {
-        x.shutdown();
+        x.shutdown("Connection lost");
     }
 }

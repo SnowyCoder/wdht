@@ -1,77 +1,183 @@
-use std::{collections::HashMap, sync::{Arc, Mutex}, iter};
+use std::{collections::{HashMap, hash_map::Entry}, sync::{Arc, Mutex}, iter};
 
 use datachannel::SessionDescription;
 use futures::future::join_all;
-use tracing::{error, warn};
-use tokio::sync::{broadcast, oneshot};
+use tracing::{error, event, Level};
+use tokio::sync::oneshot;
+use async_broadcast as broadcast;
 use wdht_logic::{Id, transport::TransportError};
 
-use super::{WrtcContact, conn::WrtcConnection, Connections, protocol::{WrtcRequest, WrtcResponse}};
+use super::{WrtcContact, conn::WrtcConnection, Connections, protocol::{WrtcRequest, WrtcResponse}, async_wrtc::WrtcError};
 
 pub type ContactResult = Result<WrtcContact, TransportError>;
 
-struct WrtcChannelCreationData {
-    id: Id,
-    answer_sender: oneshot::Sender<SessionDescription>,
-    contact_recv: oneshot::Receiver<WrtcContact>,
-    contact_sender: broadcast::Sender<ContactResult>,
+#[derive(Clone)]
+pub struct CreatingConnectionSender {
+    peer_id: Option<Id>,
+    id: usize,
+    message_sent: bool,
+    channel: broadcast::Sender<ContactResult>,
+    owner: Option<Arc<WrtcConnector>>,
 }
 
+impl CreatingConnectionSender {
+    pub fn send(mut self, result: ContactResult) -> bool {
+        self.send0(result)
+        // drop!
+    }
+
+    pub fn is_last(&self) -> bool {
+        match (self.owner.as_ref(), self.peer_id.as_ref()) {
+            (Some(parent), Some(id)) => parent.inner.lock().unwrap().connecting.get(&id).map_or(false, |x| x.1 == self.id),
+            _ => true,
+        }
+    }
+
+    fn send0(&mut self, result: ContactResult) -> bool {
+        self.message_sent = true;
+        if let (Some(owner), Some(id)) = (self.owner.take(), self.peer_id.take()) {
+            // Only send message if this is the last sender created!
+            let mut inner = owner.inner.lock().unwrap();
+            if inner.connecting.get(&id).map_or(false, |x| x.1 == self.id) {
+                let _ = self.channel.try_broadcast(result);
+                inner.connecting.remove(&id);
+                true
+            } else {
+                false
+            }
+        } else {
+            let _ = self.channel.try_broadcast(result);
+            false
+        }
+    }
+}
+
+impl Drop for CreatingConnectionSender {
+    fn drop(&mut self) {
+        if !self.message_sent {
+            self.send0(Err("creator dropped".into()));
+        }
+    }
+}
+
+type WrtcChannelCreationData = oneshot::Sender<Result<SessionDescription, WrtcError>>;
+
 #[derive(Default)]
+struct WrtcConnectorInner {
+    connecting: HashMap<Id, (broadcast::Receiver<ContactResult>, usize)>,
+    sender_id: usize,
+}
+
+impl WrtcConnectorInner {
+    pub fn create_active(&mut self, parent: &Arc<WrtcConnector>, id: Id) -> (Option<CreatingConnectionSender>, broadcast::Receiver<ContactResult>) {
+        if let Some(x) = self.connecting.get(&id) {
+            return (None, x.clone().0);
+        }
+        self.create_passive(parent, id)
+    }
+
+    pub fn create_passive(&mut self, parent: &Arc<WrtcConnector>, id: Id) -> (Option<CreatingConnectionSender>, broadcast::Receiver<ContactResult>) {
+        let entry = self.connecting.entry(id);
+        match entry {
+            Entry::Occupied(mut entry) => {
+                // Rule: only the one with the lowest connection can open!
+                // We already have an active connection present, and we're creating a passive connection
+                // Only use the passive connection if other_id < self_id
+                let sender = if id < parent.dht_id {
+                    // Use this connection
+                    let sender_id = self.sender_id;
+                    self.sender_id += 1;
+
+                    entry.get_mut().1 = sender_id;
+                    let sender = CreatingConnectionSender {
+                        peer_id: Some(id),
+                        id: sender_id,
+                        message_sent: false,
+                        channel: entry.get().0.new_sender(),
+                        owner: Some(parent.clone()),
+                    };
+                    Some(sender)
+                } else {
+                    event!(Level::INFO, kad_id=%parent.dht_id, %id, "Dropping passive connection to prevent conflict");
+                    None
+                };
+                (sender, entry.get().0.new_receiver())
+            },
+            Entry::Vacant(entry) => {
+                let sender_id = self.sender_id;
+                self.sender_id += 1;
+
+                let (sender, receiver) = broadcast::broadcast(1);
+                let sender = CreatingConnectionSender {
+                    peer_id: Some(id),
+                    id: sender_id,
+                    message_sent: false,
+                    channel: sender,
+                    owner: Some(parent.clone()),
+                };
+                entry.insert((receiver.clone(), sender_id));
+                (Some(sender), receiver)
+            },
+        }
+    }
+}
+
 pub struct WrtcConnector {
-    // TODO: use a more efficient broadcast channel (ex. crossbeam-channel?)
-    connecting: Mutex<HashMap<Id, broadcast::Sender<ContactResult>>>,
+    dht_id: Id,
+    inner: Mutex<WrtcConnectorInner>,
 }
 
 impl WrtcConnector {
-    async fn connect_to(&self, conn: &Arc<Connections>, ids: Vec<(Id, broadcast::Sender<ContactResult>)>, referrer: Arc<WrtcConnection>) {
+    pub fn new(id: Id) -> Self {
+        WrtcConnector {
+            dht_id: id,
+            inner: Default::default(),
+        }
+    }
+
+    async fn connect_to(&self, conn: &Arc<Connections>, ids: Vec<(Id, CreatingConnectionSender)>, referrer: Arc<WrtcConnection>) {
         // function to call before error-returning, it will kill all intermediary data
-        let shutdown = |err: TransportError, data: Vec<WrtcChannelCreationData>| {
-            let mut conns = self.connecting.lock().unwrap();
+        let shutdown = |err: WrtcError, data: Vec<WrtcChannelCreationData>| {
             for x in data {
-                conns.remove(&x.id);
-                let _ = x.contact_sender.send(Err(err.clone()));
+                let _ = x.send(Err(err.clone()));
             }
         };
 
         // Create N active connections
         let offers = join_all(
-            (0..ids.len())
-                    .map(|_| conn.clone().create_active())
+            ids.into_iter()
+                    .map(|(id, connector)| async move {
+                        conn.clone()
+                            .create_active_with_connector(connector)
+                            .await
+                            .map(|(desc, sender)| (id, desc, sender))
+                    })
         ).await;
 
         // map each new offer to an id, this will return
         // Vec<(id, offer)>, Vec<(id, answer_receiver, connection_receiver, connection_sender)>
         // TODO: what if the offer creation call fails?
         let (offers, middle_data): (Vec<_>, Vec<_>) =
-            ids.into_iter()
-            .zip(
-                offers.into_iter()
-                    .filter_map(|x| {
-                        match x {
-                            Err(e) => {
-                                error!("Failed to create offer: {}", e);
-                                None
-                            }
-                            Ok(x) => Some(x),
-                        }
-                    })
-            )
-            .map(|((id, contact_sender), (descriptor, answer_sender, contact_recv))| (
-                (id, descriptor),
-                WrtcChannelCreationData {
-                    id,
-                    answer_sender,
-                    contact_recv,
-                    contact_sender,
+            offers.into_iter()
+            .filter_map(|x| {
+                match x {
+                    Err(e) => {
+                        error!("Failed to create offer: {}", e);
+                        None
+                    }
+                    Ok(x) => Some(x),
                 }
+            })
+            .map(|(id, descriptor, answer_sender)| (
+                (id, descriptor),
+                answer_sender
             ))
             .unzip();
         let res = referrer.send_request(WrtcRequest::ForwardOffer(offers)).await;
         let res = match res {
             Ok(x) => x,
             Err(x) => {
-                shutdown(x, middle_data);
+                shutdown(WrtcError::Transport(x), middle_data);
                 return
             }
         };
@@ -79,13 +185,12 @@ impl WrtcConnector {
         let res = match res {
             WrtcResponse::ForwardAnswers(x) => x,
             _ => {
-                shutdown("Invalid answer received".into(), middle_data);
+                shutdown(WrtcError::InvalidMessage, middle_data);
                 return
             }
         };
 
         // Map back the received answers and wait for the channel creation to complete
-        join_all(
         // Zip our temporary data with the returned answers
         middle_data.into_iter()
             .zip(
@@ -93,49 +198,35 @@ impl WrtcConnector {
                     .map(|x| Some(x))
                     .chain(iter::repeat_with(|| None))
             )
-            .filter_map(|(data, ans)| {
+            .for_each(|(answer_sender, ans)| {
                 let ans = match ans {
                     Some(Ok(x )) => x,
                     Some(Err(x)) => {
-                        self.connecting.lock().unwrap().remove(&data.id);
-                        let _ = data.contact_sender.send(Err(format!("Client responded with error: {}", x).into()));
-                        return None;
+                        let _ = answer_sender.send(Err(format!("Client responded with error: {}", x).into()));
+                        return;
                     }
                     None => {
-                        self.connecting.lock().unwrap().remove(&data.id);
-                        let _ = data.contact_sender.send(Err("Client returned no forwarded response for id".into()));
-                        return None;
+                        let _ = answer_sender.send(Err("Client returned no forwarded response for id".into()));
+                        return;
                     }
                 };
                 // Send the answer back to the receiver and return the contact future
-                let _ = data.answer_sender.send(ans);
-                Some(async move {
-                    let recv = match data.contact_recv.await {
-                        Ok(x) => Ok(x),
-                        Err(_) => Err("Connection failed, sender dropped".into()),
-                    };
-                    self.connecting.lock().unwrap().remove(&data.id);
-                    if data.contact_sender.send(recv).is_err() {
-                        warn!("Failed to send back connection answer");
-                    }
-                })
-            })
-        ).await;
+                let _ = answer_sender.send(Ok(ans));
+            });
     }
 
-    pub async fn connect_all(&self, conn: &Arc<Connections>, referrer: Arc<WrtcConnection>, ids: Vec<Id>) -> Vec<ContactResult> {
-        let mut to_send = Vec::<(Id, broadcast::Sender<ContactResult>)>::new();
+    pub async fn connect_all(self: &Arc<Self>, conn: &Arc<Connections>, referrer: Arc<WrtcConnection>, ids: Vec<Id>) -> Vec<ContactResult> {
+        let mut to_send = Vec::<(Id, CreatingConnectionSender)>::new();
         let contacts = {
-            let mut connecting = self.connecting.lock().unwrap();
+            let mut inner = self.inner.lock().unwrap();
 
             join_all(ids.iter()
-                .map(|x| {
-                    let sender = connecting.entry(*x).or_insert_with(|| {
-                        let (sender, _receiver) = broadcast::channel(1);
-                        to_send.push((*x, sender.clone()));
-                        sender
-                    });
-                    let mut recv = sender.subscribe();
+                .map(|id| {
+                    let (sender, mut recv) = inner.create_active(self, *id);
+                    if let Some(sender) = sender {
+                        to_send.push((*id, sender));
+                    }
+
                     async move {
                         recv.recv().await.expect("Error receiving contact")
                     }
@@ -147,5 +238,30 @@ impl WrtcConnector {
         }
 
         contacts.await
+    }
+
+    pub fn is_connecting(&self, id: Id) -> bool {
+        self.inner.lock().unwrap().connecting.contains_key(&id)
+    }
+
+    pub fn create_unknown(self: &Arc<Self>) -> (CreatingConnectionSender, broadcast::Receiver<ContactResult>) {
+        let (sender, receiver) = broadcast::broadcast(1);
+        (CreatingConnectionSender {
+            peer_id: None,
+            id: 0,
+            message_sent: false,
+            channel: sender,
+            owner: None,
+        }, receiver)
+    }
+
+    pub fn create_active(self: &Arc<Self>, id: Id) -> (Option<CreatingConnectionSender>, broadcast::Receiver<ContactResult>) {
+        let mut conns = self.inner.lock().unwrap();
+        conns.create_active(self, id)
+    }
+
+    pub fn create_passive(self: &Arc<Self>, id: Id) -> (Option<CreatingConnectionSender>, broadcast::Receiver<ContactResult>) {
+        let mut conns = self.inner.lock().unwrap();
+        conns.create_passive(self, id)
     }
 }
