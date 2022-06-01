@@ -1,13 +1,30 @@
-use std::{sync::{Mutex, atomic::{AtomicU64, Ordering}}, collections::{HashMap, VecDeque}, num::NonZeroU64};
+use std::{
+    collections::{HashMap, VecDeque},
+    num::NonZeroU64,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Mutex,
+    },
+};
 
-use tracing::{info, error, warn, debug, event, Level};
+use async_broadcast as broadcast;
 use once_cell::sync::Lazy;
 use tokio::sync::oneshot;
-use async_broadcast as broadcast;
-use wdht_logic::{KademliaDht, Id, config::SystemConfig, transport::{TransportListener, TransportError}};
-use wdht_wrtc::{RtcConfig, WrtcChannel, ConnectionRole, SessionDescription, create_channel, WrtcError};
+use tracing::{debug, error, event, info, warn, Level};
+use wdht_logic::{
+    config::SystemConfig,
+    transport::{TransportError, TransportListener},
+    Id, KademliaDht,
+};
+use wdht_wrtc::{
+    create_channel, ConnectionRole, RtcConfig, SessionDescription, WrtcChannel, WrtcError,
+};
 
-use self::{conn::{WrtcConnection, PeerMessageError}, connector::{WrtcConnector, CreatingConnectionSender, ContactResult}, wasync::{Orc, Weak, spawn}};
+use self::{
+    conn::{PeerMessageError, WrtcConnection},
+    connector::{ContactResult, CreatingConnectionSender, WrtcConnector},
+    wasync::{spawn, Orc, Weak},
+};
 
 use super::wasync;
 mod conn;
@@ -16,13 +33,12 @@ mod error;
 mod protocol;
 mod sender;
 
-pub use sender::{WrtcSender, WrtcContact};
 pub use error::WrtcTransportError;
-
+pub use sender::{WrtcContact, WrtcSender};
 
 pub struct Connections {
     pub dht: Weak<KademliaDht<WrtcSender>>,
-    pub self_id: Id,// Same ase dht.upggrade().unwrap().id
+    pub self_id: Id, // Same ase dht.upggrade().unwrap().id
     max_connections: Option<NonZeroU64>,
     connection_count: AtomicU64,
     // TODO: use some locking hashmap?
@@ -34,7 +50,7 @@ pub struct Connections {
 
 static RTC_CONFIG: Lazy<RtcConfig> = Lazy::new(|| {
     // TODO: have more STUN servers.
-    RtcConfig::new(&["stun:stun1.l.google.com:19302",])
+    RtcConfig::new(&["stun:stun1.l.google.com:19302"])
 });
 
 impl Connections {
@@ -60,7 +76,7 @@ impl Connections {
         self: Orc<Self>,
         channel: WrtcChannel,
         res: Result<Id, PeerMessageError>,
-        conn_tx: CreatingConnectionSender
+        conn_tx: CreatingConnectionSender,
     ) {
         let id = match res {
             Ok(x) => x,
@@ -87,11 +103,10 @@ impl Connections {
             }
             conns.insert(id, connection.clone());
         }
-        self.dht.upgrade()
-            .map(|x| {
-                // Inform the connection that it's used in the routing table
-                connection.set_dont_cleanup(x.on_connect(id));
-            });
+        if let Some(x) = self.dht.upgrade() {
+            // Inform the connection that it's used in the routing table
+            connection.set_dont_cleanup(x.on_connect(id));
+        }
         let connection = WrtcContact::Other(connection);
         conn_tx.send(Ok(connection));
     }
@@ -103,29 +118,34 @@ impl Connections {
                 self.connection_count.fetch_add(1, Ordering::SeqCst);
                 return true;
             }
-        }.get();
+        }
+        .get();
 
-        let r = self.connection_count.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |x| {
-            if x < limit {
-                Some(x + 1)
-            } else {
-                None
-            }
-        });
+        let r = self
+            .connection_count
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |x| {
+                if x < limit {
+                    Some(x + 1)
+                } else {
+                    None
+                }
+            });
 
-        if let Ok(_) = r {
-            return true;// The connection permit is ours, wohoo!
+        if r.is_ok() {
+            return true; // The connection permit is ours, wohoo!
         }
         // Connections are full, let's try to get an half-connection that
         // we can close.
-        let r = self.half_closed_count.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |x| {
-            if x > 0 {
-                Some(x - 1)
-            } else {
-                None
-            }
-        });
-        if let Err(_) = r {
+        let r = self
+            .half_closed_count
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |x| {
+                if x > 0 {
+                    Some(x - 1)
+                } else {
+                    None
+                }
+            });
+        if r.is_err() {
             // We didn't get any permit even from the half-closed connections
             // In italian i might say "questa connessione non s'ha da fare"
             return false;
@@ -157,7 +177,7 @@ impl Connections {
         role: ConnectionRole<WrtcTransportError>,
         answer_tx: oneshot::Sender<SessionDescription>,
         is_active: bool,
-        conn_tx: CreatingConnectionSender
+        conn_tx: CreatingConnectionSender,
     ) {
         let channel = create_channel(&RTC_CONFIG, role, answer_tx).await;
 
@@ -174,16 +194,20 @@ impl Connections {
                     conn::handshake_passive(&mut channel, this.self_id).await
                 };
                 this.after_handshake(channel, res, conn_tx);
-            },
+            }
             Err(x) => {
                 this.connection_count.fetch_sub(1, Ordering::SeqCst);
                 conn_tx.send(Err(format!("{}", x).into()));
                 debug!("Error opening connection {}", x);
-            },
+            }
         };
     }
 
-    pub async fn create_passive(self: Orc<Self>, id: Id, offer: SessionDescription) -> Result<(SessionDescription, broadcast::Receiver<ContactResult>), WrtcTransportError> {
+    pub async fn create_passive(
+        self: Orc<Self>,
+        id: Id,
+        offer: SessionDescription,
+    ) -> Result<(SessionDescription, broadcast::Receiver<ContactResult>), WrtcTransportError> {
         let (conn_tx, conn_rx) = self.connector.create_passive(id);
         let conn_tx = match conn_tx {
             Some(x) => x,
@@ -199,20 +223,32 @@ impl Connections {
         drop(self);
 
         let role = ConnectionRole::Passive(offer);
-        spawn(
-            Self::create_channel_and_register(this.clone(), role, answer_tx, false, conn_tx)
-        );
+        spawn(Self::create_channel_and_register(
+            this.clone(),
+            role,
+            answer_tx,
+            false,
+            conn_tx,
+        ));
 
         debug!("Waiting for passive answer...");
-        answer_rx.await
-            .map(|x| (x, conn_rx))
-            .map_err(|_| {
-                this.upgrade().map(|x| x.connection_count.fetch_sub(1, Ordering::SeqCst));
-                WrtcError::SignalingFailed.into()
-            })
+        answer_rx.await.map(|x| (x, conn_rx)).map_err(|_| {
+            this.upgrade()
+                .map(|x| x.connection_count.fetch_sub(1, Ordering::SeqCst));
+            WrtcError::SignalingFailed.into()
+        })
     }
 
-    pub async fn create_active_with_connector(self: Orc<Self>, sender: CreatingConnectionSender) -> Result<(SessionDescription, oneshot::Sender<Result<SessionDescription, WrtcTransportError>>), WrtcTransportError> {
+    pub async fn create_active_with_connector(
+        self: Orc<Self>,
+        sender: CreatingConnectionSender,
+    ) -> Result<
+        (
+            SessionDescription,
+            oneshot::Sender<Result<SessionDescription, WrtcTransportError>>,
+        ),
+        WrtcTransportError,
+    > {
         if !self.alloc_connection() {
             return Err(WrtcTransportError::ConnectionLimitReached);
         }
@@ -224,16 +260,33 @@ impl Connections {
         drop(self);
 
         let role = ConnectionRole::Active(answer_rx);
-        spawn(Self::create_channel_and_register(this.clone(), role, offer_tx, true, sender));
+        spawn(Self::create_channel_and_register(
+            this.clone(),
+            role,
+            offer_tx,
+            true,
+            sender,
+        ));
 
         let offer = offer_rx.await.map_err(|_| {
-            this.upgrade().map(|x| x.connection_count.fetch_sub(1, Ordering::SeqCst));
+            this.upgrade()
+                .map(|x| x.connection_count.fetch_sub(1, Ordering::SeqCst));
             WrtcError::SignalingFailed
         })?;
         Ok((offer, answer_tx))
     }
 
-    pub async fn create_active(self: Orc<Self>, id: Option<Id>) -> Result<(SessionDescription, oneshot::Sender<Result<SessionDescription, WrtcTransportError>>, broadcast::Receiver<ContactResult>), WrtcTransportError> {
+    pub async fn create_active(
+        self: Orc<Self>,
+        id: Option<Id>,
+    ) -> Result<
+        (
+            SessionDescription,
+            oneshot::Sender<Result<SessionDescription, WrtcTransportError>>,
+            broadcast::Receiver<ContactResult>,
+        ),
+        WrtcTransportError,
+    > {
         let (conn_tx, conn_rx) = match id {
             Some(id) => match self.connector.create_active(id) {
                 (Some(sender), chan) => (sender, chan),
@@ -247,7 +300,10 @@ impl Connections {
     }
 
     fn on_disconnect(&self, peer_id: Id, update_conn_count: bool, was_half_closed: bool) {
-        info!("{} disconnected (half_closed: {})", peer_id, was_half_closed);
+        info!(
+            "{} disconnected (half_closed: {})",
+            peer_id, was_half_closed
+        );
         self.connections.lock().unwrap().remove(&peer_id);
         if update_conn_count {
             self.connection_count.fetch_sub(1, Ordering::SeqCst);
@@ -265,7 +321,9 @@ impl Connections {
             }
         }
 
-        self.dht.upgrade().map(|dht| dht.on_disconnect(peer_id));
+        if let Some(dht) = self.dht.upgrade() {
+            dht.on_disconnect(peer_id);
+        }
     }
 
     pub(crate) fn on_half_closed(&self, conn: Id) {

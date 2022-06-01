@@ -1,9 +1,9 @@
-mod error;
 mod base;
+mod error;
 
-pub use error::WrtcError;
-use serde::{Serialize, Deserialize};
-use tokio::sync::{oneshot, mpsc};
+pub use error::{Result, WrtcError};
+use serde::{Deserialize, Serialize};
+use tokio::sync::{mpsc, oneshot};
 
 // Re-export things to make them prettier and consistent with base changes.
 
@@ -13,21 +13,21 @@ pub struct SessionDescription(base::SessionDescription);
 
 pub enum ConnectionRole<E: From<WrtcError>> {
     // Active: sends offer and awaits an answer
-    Active(oneshot::Receiver<Result<SessionDescription, E>>),
+    Active(oneshot::Receiver<core::result::Result<SessionDescription, E>>),
     // Passive: receives an offer, sends an answer back
     Passive(SessionDescription),
 }
 
 pub struct WrtcChannel {
     pub sender: WrtcDataChannel,
-    pub listener: mpsc::Receiver<Result<Vec<u8>, WrtcError>>,
+    pub listener: mpsc::Receiver<Result<Vec<u8>>>,
 }
 
 // If this is dropped the connection is also closed
 pub struct WrtcDataChannel(base::WrtcDataChannel);
 
 impl WrtcDataChannel {
-    pub fn send(&mut self, msg: &[u8]) -> Result<(), WrtcError> {
+    pub fn send(&mut self, msg: &[u8]) -> Result<()> {
         self.0.send(msg)
     }
 }
@@ -41,12 +41,16 @@ impl RtcConfig {
     }
 }
 
-pub async fn create_channel<E>(config: &RtcConfig, role: ConnectionRole<E>, answer: oneshot::Sender<SessionDescription>) ->
-        Result<WrtcChannel, E>
-    where E: From<WrtcError> {
+pub async fn create_channel<E>(
+    config: &RtcConfig,
+    role: ConnectionRole<E>,
+    answer: oneshot::Sender<SessionDescription>,
+) -> core::result::Result<WrtcChannel, E>
+where
+    E: From<WrtcError>,
+{
     base::create_channel(&config.0, role, answer).await
 }
-
 
 #[cfg(test)]
 mod tests {

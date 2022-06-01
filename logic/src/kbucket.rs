@@ -1,5 +1,4 @@
-use crate::{id::Id, transport::TransportSender, config::RoutingConfig};
-
+use crate::{config::RoutingConfig, id::Id, transport::TransportSender};
 
 #[derive(Debug, Default)]
 pub struct KBucket {
@@ -9,9 +8,7 @@ pub struct KBucket {
 
 impl KBucket {
     pub fn refresh_node(&mut self, id: Id) -> bool {
-        let entry = self.entries.iter_mut()
-            .enumerate()
-            .find(|(_, x)| **x == id);
+        let entry = self.entries.iter_mut().enumerate().find(|(_, x)| **x == id);
 
         match entry {
             Some((index, _entry)) => {
@@ -24,11 +21,15 @@ impl KBucket {
     }
 
     pub fn has(&self, id: Id) -> bool {
-        (self.entries.iter().chain(self.replacement_cache.iter()))
-                .any(|x| *x == id)
+        (self.entries.iter().chain(self.replacement_cache.iter())).any(|x| *x == id)
     }
 
-    pub fn insert<T: TransportSender>(&mut self, id: Id, config: &RoutingConfig, contacter: &T) -> bool {
+    pub fn insert<T: TransportSender>(
+        &mut self,
+        id: Id,
+        config: &RoutingConfig,
+        contacter: &T,
+    ) -> bool {
         if self.has(id) {
             return false;
         }
@@ -40,7 +41,7 @@ impl KBucket {
         if self.replacement_cache.len() < config.bucket_replacement_size {
             self.replacement_cache.push(id);
             for x in self.entries.iter() {
-                contacter.ping(x);
+                contacter.ping(*x);
             }
             true
         } else {
@@ -53,17 +54,15 @@ impl KBucket {
         if let Some(i) = i {
             self.entries.remove(i);
             // Promote one item from the cache (if present)
-            if self.replacement_cache.len() > 0 {
+            if !self.replacement_cache.is_empty() {
                 self.entries.push(self.replacement_cache.remove(0));
             }
             true
+        } else if let Some(i) = self.replacement_cache.iter().position(|x| *x == id) {
+            self.replacement_cache.remove(i);
+            true
         } else {
-            if let Some(i) = self.replacement_cache.iter().position(|x| *x == id) {
-                self.replacement_cache.remove(i);
-                true
-            } else {
-                false
-            }
+            false
         }
     }
 }

@@ -1,5 +1,7 @@
-use crate::{config::RoutingConfig, consts::ID_LEN_BITS, kbucket::KBucket, id::Id, transport::TransportSender};
-
+use crate::{
+    config::RoutingConfig, consts::ID_LEN_BITS, id::Id, kbucket::KBucket,
+    transport::TransportSender,
+};
 
 pub struct KTreeEntry {
     buckets: Vec<KBucket>,
@@ -9,9 +11,10 @@ impl KTreeEntry {
     pub fn new(config: &RoutingConfig) -> Self {
         KTreeEntry {
             // Create 2**buckets_per_bit buckets (each bit is one entry)
-            buckets: (0..1 << (config.buckets_per_bit as usize - 1)).into_iter()
-                    .map(|_| KBucket::default())
-                    .collect(),
+            buckets: (0..1 << (config.buckets_per_bit as usize - 1))
+                .into_iter()
+                .map(|_| KBucket::default())
+                .collect(),
         }
     }
 }
@@ -36,17 +39,15 @@ impl KTree {
 
     fn get_bucket_index(&self, id: Id) -> (usize, usize) {
         let nid = self.id ^ id;
-        let entryi = nid.leading_zeros()
+        let entryi = nid
+            .leading_zeros()
             .min((ID_LEN_BITS - self.config.buckets_per_bit) as u8);
         let bucketi = if self.config.buckets_per_bit == 1 {
-            0// fast path (please compiler optimize it away)
+            0 // fast path (please compiler optimize it away)
         } else {
-            nid.bitslice(
-                entryi as u32 + 1,
-                self.config.buckets_per_bit as u8 - 1
-            ) as usize
+            nid.bitslice(entryi as u32 + 1, self.config.buckets_per_bit as u8 - 1) as usize
         };
-        return (entryi as usize, bucketi);
+        (entryi as usize, bucketi)
     }
 
     fn get_bucket(&self, id: Id) -> &KBucket {
@@ -60,7 +61,7 @@ impl KTree {
     }
 
     pub fn has(&self, id: Id) -> bool {
-        return self.get_bucket(id).has(id);
+        self.get_bucket(id).has(id)
     }
 
     pub fn insert<T: TransportSender>(&mut self, id: Id, contacter: &T) -> bool {
@@ -68,13 +69,15 @@ impl KTree {
             return false;
         }
         // Check max connection count
-        if self.config.max_routing_count.map_or(false, |max| self.size >= max.get()) {
+        if self
+            .config
+            .max_routing_count
+            .map_or(false, |max| self.size >= max.get())
+        {
             return false;
         }
         let index = self.get_bucket_index(id);
-        let inserted = self.nodes[index.0]
-            .buckets[index.1]
-            .insert(id, &self.config, contacter);
+        let inserted = self.nodes[index.0].buckets[index.1].insert(id, &self.config, contacter);
 
         if inserted {
             self.size += 1;
@@ -106,9 +109,12 @@ impl KTree {
         }
 
         // Add every other bucket
-        for (_i, bucket) in fentry.buckets.iter()
-                .enumerate()
-                .filter(|(i, _)| *i != index.1) {
+        for (_i, bucket) in fentry
+            .buckets
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != index.1)
+        {
             res.add_bucket(bucket);
         }
 
@@ -161,7 +167,6 @@ impl KTree {
         //   on the right side
         // - if we need to find something on index BITS-1 there is no right
         //   side so we just search on the left
-
 
         // So: search on the right side
         for entry in self.nodes.iter().skip(index.0 + 1) {
@@ -218,7 +223,10 @@ impl NodeAggregator {
     }
 
     pub fn finish(self, closer_to: Id) -> Vec<Id> {
-        let Self {nodes: mut vec, limit} = self;
+        let Self {
+            nodes: mut vec,
+            limit,
+        } = self;
         vec.sort_unstable_by_key(|x| closer_to ^ *x);
         vec.truncate(limit);
         vec
@@ -227,7 +235,11 @@ impl NodeAggregator {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, future, sync::{Arc, Mutex, MutexGuard}};
+    use std::{
+        collections::HashMap,
+        future,
+        sync::{Arc, Mutex, MutexGuard},
+    };
 
     use crate::transport::{Response, TransportError};
 
@@ -237,10 +249,10 @@ mod tests {
     struct IgnoreContacter;
 
     impl TransportSender for IgnoreContacter {
-        fn ping(&self, _id: &Id) {}
+        fn ping(&self, _id: Id) {}
 
         type Fut = future::Ready<Result<Response, TransportError>>;
-        fn send(&self, _id: &Id, _msg: crate::transport::Request) -> Self::Fut {
+        fn send(&self, _id: Id, _msg: crate::transport::Request) -> Self::Fut {
             panic!();
         }
 
@@ -266,7 +278,7 @@ mod tests {
         let contacter = &mut IgnoreContacter;
         assert_eq!(tree.insert(Id::from_hex("b0000001"), contacter), true);
         assert_eq!(tree.insert(Id::from_hex("b0000010"), contacter), true);
-        assert_eq!(tree.insert(Id::from_hex("b0000011"), contacter), true);// cache
+        assert_eq!(tree.insert(Id::from_hex("b0000011"), contacter), true); // cache
         assert_eq!(tree.insert(Id::from_hex("b0000100"), contacter), false);
         // Add similar entries but closer to the tree
         // closer bucket (0)
@@ -277,12 +289,12 @@ mod tests {
         // bucket 2
         assert_eq!(tree.insert(Id::from_hex("a0000100"), contacter), true);
         assert_eq!(tree.insert(Id::from_hex("a0000101"), contacter), true);
-        assert_eq!(tree.insert(Id::from_hex("a0000110"), contacter), true);// cache
-        assert_eq!(tree.insert(Id::from_hex("a0000111"), contacter), false);// full
+        assert_eq!(tree.insert(Id::from_hex("a0000110"), contacter), true); // cache
+        assert_eq!(tree.insert(Id::from_hex("a0000111"), contacter), false); // full
 
         // client a100 disconnects, so a110 enters cache and we can insert a111 (well, in the cache)
         tree.remove(Id::from_hex("a0000100"));
-        assert_eq!(tree.insert(Id::from_hex("a0000111"), contacter), true);// cached
+        assert_eq!(tree.insert(Id::from_hex("a0000111"), contacter), true); // cached
     }
 
     #[test]
@@ -304,15 +316,19 @@ mod tests {
         tree.insert(Id::from_hex("a0000001"), contacter);
         tree.insert(Id::from_hex("a0000010"), contacter);
 
-        let actual = tree.get_closer_n(Id::from_hex("b0001001"), 3)
-                .iter()
-                .map(|x| (*x).clone())
-                .collect::<Vec<_>>();
-        assert_eq!(vec![
-            Id::from_hex("b0001000"),
-            Id::from_hex("b0000000"),
-            Id::from_hex("a0001000"),
-        ], actual);
+        let actual = tree
+            .get_closer_n(Id::from_hex("b0001001"), 3)
+            .iter()
+            .map(|x| (*x).clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            vec![
+                Id::from_hex("b0001000"),
+                Id::from_hex("b0000000"),
+                Id::from_hex("a0001000"),
+            ],
+            actual
+        );
     }
 
     #[derive(Clone)]
@@ -325,14 +341,12 @@ mod tests {
     }
 
     impl TransportSender for MapContacter {
-        fn ping(&self, id: &Id) {
-            *self.inner()
-                .entry(id.clone())
-                .or_insert(0) += 1;
+        fn ping(&self, id: Id) {
+            *self.inner().entry(id).or_insert(0) += 1;
         }
 
         type Fut = future::Ready<Result<Response, TransportError>>;
-        fn send(&self, _id: &Id, _msg: crate::transport::Request) -> Self::Fut {
+        fn send(&self, _id: Id, _msg: crate::transport::Request) -> Self::Fut {
             panic!();
         }
 
@@ -366,29 +380,38 @@ mod tests {
         assert_eq!(tree.insert(Id::from_hex("a0000100"), &mut contacter), true);
         assert_eq!(tree.insert(Id::from_hex("a0000101"), &mut contacter), true);
         assert!(contacter.inner().is_empty());
-        assert_eq!(tree.insert(Id::from_hex("a0000110"), &mut contacter), true);// cache
-        // should only ping bucket 2!
-        assert_eq!(*contacter.inner(), HashMap::from([
-            (Id::from_hex("a0000100"), 1usize),
-            (Id::from_hex("a0000101"), 1),
-        ]));
+        assert_eq!(tree.insert(Id::from_hex("a0000110"), &mut contacter), true); // cache
+                                                                                 // should only ping bucket 2!
+        assert_eq!(
+            *contacter.inner(),
+            HashMap::from([
+                (Id::from_hex("a0000100"), 1usize),
+                (Id::from_hex("a0000101"), 1),
+            ])
+        );
         // second cache entry SHOULD reping, it's the contacter job do deduplicate pings
-        assert_eq!(tree.insert(Id::from_hex("a0000111"), &mut contacter), true);// cache 2
-        assert_eq!(*contacter.inner(), HashMap::from([
-            (Id::from_hex("a0000100"), 2usize),
-            (Id::from_hex("a0000101"), 2),
-        ]));
+        assert_eq!(tree.insert(Id::from_hex("a0000111"), &mut contacter), true); // cache 2
+        assert_eq!(
+            *contacter.inner(),
+            HashMap::from([
+                (Id::from_hex("a0000100"), 2usize),
+                (Id::from_hex("a0000101"), 2),
+            ])
+        );
 
         let old_map = contacter.inner().clone();
         // client a100 disconnects, so a110 enters cache and we can insert a111 (well, in the cache)
         tree.remove(Id::from_hex("a0000100"));
         assert_eq!(*contacter.inner(), old_map);
         contacter.inner().clear();
-        assert_eq!(tree.insert(Id::from_hex("a0000100"), &mut contacter), true);// cached
-        assert_eq!(*contacter.inner(), HashMap::from([
-            (Id::from_hex("a0000101"), 1),
-            (Id::from_hex("a0000110"), 1),// promoted from cache and contacted
-        ]));
+        assert_eq!(tree.insert(Id::from_hex("a0000100"), &mut contacter), true); // cached
+        assert_eq!(
+            *contacter.inner(),
+            HashMap::from([
+                (Id::from_hex("a0000101"), 1),
+                (Id::from_hex("a0000110"), 1), // promoted from cache and contacted
+            ])
+        );
     }
 
     #[test]
@@ -407,7 +430,7 @@ mod tests {
         let contacter = &mut IgnoreContacter;
         assert_eq!(tree.insert(Id::from_hex("b0000001"), contacter), true);
         assert_eq!(tree.insert(Id::from_hex("b0000010"), contacter), true);
-        assert_eq!(tree.insert(Id::from_hex("b0000011"), contacter), true);// cache
+        assert_eq!(tree.insert(Id::from_hex("b0000011"), contacter), true); // cache
         assert_eq!(tree.insert(Id::from_hex("b0000100"), contacter), false);
         // Add similar entries but with a different prefix
         //     bits _ xor a
@@ -420,7 +443,7 @@ mod tests {
         assert_eq!(tree.insert(Id::from_hex("c0000010"), contacter), true);
         assert_eq!(tree.insert(Id::from_hex("e0000001"), contacter), true);
         assert_eq!(tree.insert(Id::from_hex("e0000010"), contacter), true);
-        assert_eq!(tree.insert(Id::from_hex("e0000011"), contacter), true);// cache
-        assert_eq!(tree.insert(Id::from_hex("e0000100"), contacter), false);// full
+        assert_eq!(tree.insert(Id::from_hex("e0000011"), contacter), true); // cache
+        assert_eq!(tree.insert(Id::from_hex("e0000100"), contacter), false); // full
     }
 }

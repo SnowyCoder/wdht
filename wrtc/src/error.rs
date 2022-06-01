@@ -2,7 +2,6 @@ use std::borrow::Cow;
 
 use thiserror::Error;
 
-
 #[derive(Error, Debug, Clone)]
 #[non_exhaustive]
 pub enum WrtcError {
@@ -17,3 +16,5 @@ pub enum WrtcError {
     #[error("Unknown runtime error: {0}")]
     RuntimeError(String),
 }
+
+pub type Result<T> = core::result::Result<T, WrtcError>;

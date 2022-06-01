@@ -1,6 +1,5 @@
 use std::num::NonZeroU64;
 
-
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct SystemConfig {
     pub routing: RoutingConfig,

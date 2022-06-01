@@ -1,15 +1,23 @@
-use std::{borrow::Cow, collections::HashMap, sync::Mutex, time::Duration, fmt::Debug};
+use std::{borrow::Cow, collections::HashMap, fmt::Debug, sync::Mutex, time::Duration};
 
 use futures::future::join_all;
-use tracing::{warn, debug, info, Instrument, span, Level};
 use serde::Serialize;
 use thiserror::Error;
-use tokio::sync::{oneshot, mpsc};
-use wdht_logic::{transport::{TransportError, TransportListener}, Id};
-use wdht_wrtc::{WrtcChannel, WrtcError, WrtcDataChannel};
+use tokio::sync::{mpsc, oneshot};
+use tracing::{debug, info, span, warn, Instrument, Level};
+use wdht_logic::{
+    transport::{TransportError, TransportListener},
+    Id,
+};
+use wdht_wrtc::{WrtcChannel, WrtcDataChannel, WrtcError};
 
-use super::{protocol::{HandshakeRequest, HandshakeResponse, WrtcResponse, WrtcMessage, WrtcPayload, WrtcRequest}, Connections, WrtcTransportError, wasync::{Orc, Weak, spawn, sleep}};
-
+use super::{
+    protocol::{
+        HandshakeRequest, HandshakeResponse, WrtcMessage, WrtcPayload, WrtcRequest, WrtcResponse,
+    },
+    wasync::{sleep, spawn, Orc, Weak},
+    Connections, WrtcTransportError,
+};
 
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -25,7 +33,7 @@ pub enum PeerMessageError {
     #[error("Internal error: {0}")]
     InternalError(Box<dyn std::error::Error>),
     #[error("Unknown internal error: {0}")]
-    UnknownInternalError(&'static str)
+    UnknownInternalError(&'static str),
 }
 
 impl From<WrtcError> for PeerMessageError {
@@ -47,36 +55,39 @@ impl From<serde_json::Error> for PeerMessageError {
 }
 
 fn encode_data<T: Serialize>(data: &T) -> Result<Vec<u8>, PeerMessageError> {
-    serde_json::to_vec(data)
-        .map_err(|x| PeerMessageError::InternalError(Box::new(x)))
+    serde_json::to_vec(data).map_err(|x| PeerMessageError::InternalError(Box::new(x)))
 }
 
 pub async fn handshake_passive(conn: &mut WrtcChannel, id: Id) -> Result<Id, PeerMessageError> {
-    let msg = conn.listener.recv().await
+    let msg = conn
+        .listener
+        .recv()
+        .await
         .ok_or(WrtcError::ConnectionLost)??;
     let req = serde_json::from_slice::<HandshakeRequest>(&msg)?;
 
     let peer_id = req.my_id;
 
-    let ans = HandshakeResponse::Ok {
-        my_id: id,
-    };
+    let ans = HandshakeResponse::Ok { my_id: id };
     let msg = encode_data(&ans)?;
-    conn.sender.send(&msg)
+    conn.sender
+        .send(&msg)
         .map_err(|_| WrtcError::ConnectionLost)?;
 
     Ok(peer_id)
 }
 
 pub async fn handshake_active(conn: &mut WrtcChannel, id: Id) -> Result<Id, PeerMessageError> {
-    let msg = encode_data(&HandshakeRequest {
-        my_id: id,
-    })?;
-    conn.sender.send(&msg)
+    let msg = encode_data(&HandshakeRequest { my_id: id })?;
+    conn.sender
+        .send(&msg)
         .map_err(|_| WrtcError::ConnectionLost)?;
 
     debug!("Waiting for handshake response...");
-    let msg = conn.listener.recv().await
+    let msg = conn
+        .listener
+        .recv()
+        .await
         .ok_or(WrtcError::ConnectionLost)??;
     let res = serde_json::from_slice::<HandshakeResponse>(&msg)?;
 
@@ -112,11 +123,15 @@ impl InnerWrtcConnection {
         let message = self.wrap_message(mex);
         let data = serde_json::to_vec(&message).expect("Failed to serialize");
 
-        self.channel.send(&data)
+        self.channel
+            .send(&data)
             .map_err(|_| WrtcError::DataChannelError("Failed to send message".into()))
     }
 
-    pub fn send_request(&mut self, mex: WrtcRequest) -> oneshot::Receiver<Result<WrtcResponse, TransportError>> {
+    pub fn send_request(
+        &mut self,
+        mex: WrtcRequest,
+    ) -> oneshot::Receiver<Result<WrtcResponse, TransportError>> {
         let message = self.wrap_message(mex);
         debug!("Send: {:?}", message);
 
@@ -125,7 +140,8 @@ impl InnerWrtcConnection {
 
         let data = serde_json::to_vec(&message).expect("Failed to serialize");
         if let Err(_err) = self.channel.send(&data) {
-            self.responses.remove(&message.id)
+            self.responses
+                .remove(&message.id)
                 .map(|x| x.send(Err("Failed to send message".into())));
         }
 
@@ -158,10 +174,7 @@ pub struct WrtcConnection {
 impl WrtcConnection {
     pub fn new(peer_id: Id, channel: WrtcChannel, parent: Weak<Connections>) -> Orc<Self> {
         let kad_id = parent.upgrade().unwrap().dht.upgrade().unwrap().id();
-        let WrtcChannel {
-            sender,
-            listener
-        } = channel;
+        let WrtcChannel { sender, listener } = channel;
         let res = Orc::new(Self {
             peer_id,
             inner: Mutex::new(InnerWrtcConnection {
@@ -176,13 +189,17 @@ impl WrtcConnection {
         });
 
         spawn(
-            connection_listen(listener, Orc::downgrade(&res))
-            .instrument(span!(parent: None, Level::INFO, "kad_listener_wrtc", %kad_id, peer_id=%peer_id))
+            connection_listen(listener, Orc::downgrade(&res)).instrument(
+                span!(parent: None, Level::INFO, "kad_listener_wrtc", %kad_id, peer_id=%peer_id),
+            ),
         );
         res
     }
 
-    pub async fn send_request(self: &Orc<Self>, mex: WrtcRequest) -> Result<WrtcResponse, TransportError> {
+    pub async fn send_request(
+        self: Orc<Self>,
+        mex: WrtcRequest,
+    ) -> Result<WrtcResponse, TransportError> {
         let reply = self.inner.lock().unwrap().send_request(mex);
 
         let weak = Orc::downgrade(&self);
@@ -201,7 +218,7 @@ impl WrtcConnection {
             x = reply => {
                 match x {
                     Ok(x) => x,
-                    Err(_) => return Err(TransportError::ConnectionLost),
+                    Err(_) => Err(TransportError::ConnectionLost),
                 }
             }
         }
@@ -220,7 +237,11 @@ impl WrtcConnection {
             None => return,
         };
         parent.connections.lock().unwrap().remove(&self.peer_id);
-        parent.on_disconnect(self.peer_id, true, self.inner.lock().unwrap().this_half_closed);
+        parent.on_disconnect(
+            self.peer_id,
+            true,
+            self.inner.lock().unwrap().this_half_closed,
+        );
 
         self.shutdown_local();
     }
@@ -241,7 +262,7 @@ impl WrtcConnection {
         let other_half_closed = {
             let mut inner = self.inner.lock().unwrap();
             if inner.dont_cleanup {
-                return;// Can't close this half, it's used in the routing table
+                return; // Can't close this half, it's used in the routing table
             }
             if !inner.other_half_closed {
                 // Don't set this half closed, we're closing the connection instantly
@@ -252,7 +273,9 @@ impl WrtcConnection {
         if other_half_closed {
             self.shutdown("Both halfes closed (sent)");
         } else {
-            self.parent.upgrade().map(|x| x.on_half_closed(self.peer_id));
+            if let Some(x) = self.parent.upgrade() {
+                x.on_half_closed(self.peer_id);
+            }
             if let Err(x) = self.send_half_close() {
                 warn!("Failed to send half-close: {}", x);
             }
@@ -265,36 +288,39 @@ impl WrtcConnection {
 }
 
 fn process_message(msg: &[u8], conn: Orc<WrtcConnection>) -> Result<(), PeerMessageError> {
-    let msg: WrtcMessage = serde_json::from_slice(&msg)?;
+    let msg: WrtcMessage = serde_json::from_slice(msg)?;
     debug!("Received message: {:?}", msg);
     let req = match msg.payload {
         WrtcPayload::Req(x) => x,
         WrtcPayload::Res(x) => {
             let mut inner = conn.inner.lock().unwrap();
-            let response = inner.responses.remove(&msg.id)
+            let response = inner
+                .responses
+                .remove(&msg.id)
                 .ok_or(PeerMessageError::UnknownAnswerId)?;
             // Ignore sending error
             let _ = response.send(Ok(x));
             return Ok(());
-        },
+        }
     };
 
-    let root = conn.parent.upgrade()
+    let root = conn
+        .parent
+        .upgrade()
         .ok_or(PeerMessageError::UnknownInternalError("Shutting down"))?;
 
     match req {
         WrtcRequest::Req(x) => {
             let dht = match root.dht.upgrade() {
                 Some(x) => x,
-                None => return Ok(()),// Shutting down
+                None => return Ok(()), // Shutting down
             };
             let ans = dht.on_request(conn.peer_id, x);
             conn.send_response(msg.id, WrtcResponse::Ans(ans));
-        },
+        }
         WrtcRequest::ForwardOffer(offers) => {
             let connections = root.connections.lock().unwrap();
-            let fut = join_all(offers.into_iter()
-                    .map(|(id, offer)| {
+            let fut = join_all(offers.into_iter().map(|(id, offer)| {
                 let oconn = connections.get(&id).cloned();
                 let peer_id = conn.peer_id;
                 async move {
@@ -305,7 +331,7 @@ fn process_message(msg: &[u8], conn: Orc<WrtcConnection>) -> Result<(), PeerMess
                                 Ok(_) => Err("peer_error".into()),
                                 Err(_) => Err("not_found".into()),
                             }
-                        },
+                        }
                         None => Err("not_found".into()),
                     }
                 }
@@ -317,12 +343,15 @@ fn process_message(msg: &[u8], conn: Orc<WrtcConnection>) -> Result<(), PeerMess
                     Some(x) => x,
                     None => return,
                 };
-                connection.send_response(msg.id,WrtcResponse::ForwardAnswers(results));
+                connection.send_response(msg.id, WrtcResponse::ForwardAnswers(results));
             });
-        },
+        }
         WrtcRequest::TryOffer(id, offer) => {
             if root.connections.lock().unwrap().contains_key(&id) {
-                conn.send_response(msg.id, WrtcResponse::OkAnswer(Err("already_connected".into())));
+                conn.send_response(
+                    msg.id,
+                    WrtcResponse::OkAnswer(Err("already_connected".into())),
+                );
                 return Ok(());
             }
 
@@ -336,7 +365,7 @@ fn process_message(msg: &[u8], conn: Orc<WrtcConnection>) -> Result<(), PeerMess
                     x.send_response(msg.id, res);
                 }
             });
-        },
+        }
         WrtcRequest::HalfClose => {
             let mut inner = conn.inner.lock().unwrap();
             inner.other_half_closed = true;
@@ -350,7 +379,10 @@ fn process_message(msg: &[u8], conn: Orc<WrtcConnection>) -> Result<(), PeerMess
     Ok(())
 }
 
-async fn connection_listen(mut mex_rx: mpsc::Receiver<Result<Vec<u8>, WrtcError>>, conn: Weak<WrtcConnection>) {
+async fn connection_listen(
+    mut mex_rx: mpsc::Receiver<Result<Vec<u8>, WrtcError>>,
+    conn: Weak<WrtcConnection>,
+) {
     while let Some(msg) = mex_rx.recv().await {
         match (msg, conn.upgrade()) {
             (Ok(x), Some(conn)) => {

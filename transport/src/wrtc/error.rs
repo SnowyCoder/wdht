@@ -4,8 +4,6 @@ use thiserror::Error;
 use wdht_logic::transport::TransportError;
 use wdht_wrtc::WrtcError;
 
-
-
 #[derive(Error, Debug, Clone)]
 pub enum WrtcTransportError {
     #[error("{0}")]

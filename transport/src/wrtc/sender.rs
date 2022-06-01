@@ -1,12 +1,23 @@
 use core::future::Future;
 use std::fmt::{Debug, Formatter};
 use tracing::warn;
-use wdht_logic::{transport::{TransportSender, Request, RawResponse, TransportError, Contact}, Id};
+use wdht_logic::{
+    transport::{Contact, RawResponse, Request, TransportError, TransportSender},
+    Id,
+};
 
-use super::{Connections, protocol::{WrtcRequest, WrtcResponse}, conn::WrtcConnection, wasync::Orc};
+use super::{
+    conn::WrtcConnection,
+    protocol::{WrtcRequest, WrtcResponse},
+    wasync::Orc,
+    Connections,
+};
 
-
-async fn resolve_nodes(referrer: Orc<WrtcConnection>, conn: &Orc<Connections>, ids: Vec<Id>) -> Result<Vec<WrtcContact>, TransportError> {
+async fn resolve_nodes(
+    referrer: Orc<WrtcConnection>,
+    conn: &Orc<Connections>,
+    ids: Vec<Id>,
+) -> Result<Vec<WrtcContact>, TransportError> {
     // Collect old_contacts (contacts already known)
     // and contacts to query
     // old_contacts is a Vec<Option<WrtcContact>>, None elements are placeholders for
@@ -14,22 +25,20 @@ async fn resolve_nodes(referrer: Orc<WrtcConnection>, conn: &Orc<Connections>, i
     let mut to_query = Vec::new();
     let old_contacts = {
         let connections = conn.connections.lock().unwrap();
-        ids.into_iter().map(|id| {
-            let x = connections.get(&id);
-            if let None = x {
-                to_query.push(id)
-            }
-            x.cloned().map(|x| WrtcContact::Other(x))
-        }).collect::<Vec<_>>()
+        ids.into_iter()
+            .map(|id| {
+                let x = connections.get(&id);
+                if x.is_none() {
+                    to_query.push(id)
+                }
+                x.cloned().map(WrtcContact::Other)
+            })
+            .collect::<Vec<_>>()
     };
 
     if to_query.is_empty() {
         // No new node needs to be queried, we know them all!
-        return Ok(
-            old_contacts.into_iter()
-                .map(|x| x.unwrap())
-                .collect()
-        );
+        return Ok(old_contacts.into_iter().map(|x| x.unwrap()).collect());
     }
 
     let new_contacts = conn.connector.connect_all(conn, referrer, to_query).await;
@@ -37,25 +46,28 @@ async fn resolve_nodes(referrer: Orc<WrtcConnection>, conn: &Orc<Connections>, i
     // Piece back together old contacts and new contacts
     let mut new_contacts = new_contacts.into_iter();
 
-    let res = old_contacts.into_iter()
-        .filter_map(|x| {
-            match x {
-                Some(x) => Some(x),
-                None => new_contacts.next().and_then(|x| match x {
-                    Ok(x) => Some(x),
-                    Err(e) => {
-                        warn!("Error connecting: {}", e);
-                        None
-                    }
-                }),
-            }
+    let res = old_contacts
+        .into_iter()
+        .filter_map(|x| match x {
+            Some(x) => Some(x),
+            None => new_contacts.next().and_then(|x| match x {
+                Ok(x) => Some(x),
+                Err(e) => {
+                    warn!("Error connecting: {}", e);
+                    None
+                }
+            }),
         })
         .collect::<Vec<_>>();
 
     Ok(res)
 }
 
-async fn translate_response(contact: Orc<WrtcConnection>, conn: Orc<Connections>, res: RawResponse<Id>) -> Result<RawResponse<WrtcContact>, TransportError> {
+async fn translate_response(
+    contact: Orc<WrtcConnection>,
+    conn: Orc<Connections>,
+    res: RawResponse<Id>,
+) -> Result<RawResponse<WrtcContact>, TransportError> {
     use RawResponse::*;
     Ok(match res {
         FoundNodes(nodes) => FoundNodes(resolve_nodes(contact, &conn, nodes).await?),
@@ -65,31 +77,33 @@ async fn translate_response(contact: Orc<WrtcConnection>, conn: Orc<Connections>
     })
 }
 
-
 #[derive(Clone)]
 pub struct WrtcSender(pub(crate) Orc<Connections>);
 
 impl TransportSender for WrtcSender {
-    fn ping(&self, _id: &Id) {
+    fn ping(&self, _id: Id) {
         // WebRTC automatically manages disconnections
     }
 
-    type Fut = impl Future<Output=Result<RawResponse<Self::Contact>, TransportError>>;
+    type Fut = impl Future<Output = Result<RawResponse<Self::Contact>, TransportError>>;
 
-    fn send(&self, id: &Id, msg: Request) -> Self::Fut {
+    fn send(&self, id: Id, msg: Request) -> Self::Fut {
         let root = self.0.clone();
-        let id = *id;
         async move {
-            let contact = root.connections.lock().unwrap().get(&id)
+            let contact = root
+                .connections
+                .lock()
+                .unwrap()
+                .get(&id)
                 .ok_or(TransportError::ContactLost)?
                 .clone();
 
-            let res = contact.send_request(WrtcRequest::Req(msg)).await;
+            let res = contact.clone().send_request(WrtcRequest::Req(msg)).await;
 
             match res {
                 Ok(WrtcResponse::Ans(x)) => translate_response(contact, root, x).await,
                 Ok(_) => Err(TransportError::UnknownError("Invalid response".into())),
-                Err(x) => Err(x.into()),
+                Err(x) => Err(x),
             }
         }
     }
@@ -99,14 +113,19 @@ impl TransportSender for WrtcSender {
             return WrtcContact::SelfId(id);
         }
 
-        WrtcContact::Other(self.0.connections.lock().unwrap().get(&id)
-            .expect("Cannot find contact")
-            .clone())
+        WrtcContact::Other(
+            self.0
+                .connections
+                .lock()
+                .unwrap()
+                .get(&id)
+                .expect("Cannot find contact")
+                .clone(),
+        )
     }
 
     type Contact = WrtcContact;
 }
-
 
 #[derive(Clone)]
 pub enum WrtcContact {
@@ -123,7 +142,7 @@ impl Drop for WrtcContact {
 
         // this + connection's
         if Orc::strong_count(parent) != 2 {
-            return
+            return;
         }
 
         parent.on_contact_lost();
@@ -131,16 +150,16 @@ impl Drop for WrtcContact {
 }
 
 impl Contact for WrtcContact {
-    fn id(&self) -> &Id {
+    fn id(&self) -> Id {
         match self {
-            WrtcContact::SelfId(x) => x,
-            WrtcContact::Other(x) => &x.peer_id,
+            WrtcContact::SelfId(x) => *x,
+            WrtcContact::Other(x) => x.peer_id,
         }
     }
 }
 
 impl Debug for WrtcContact {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("WrtcContact").field(self.id()).finish()
+        f.debug_tuple("WrtcContact").field(&self.id()).finish()
     }
 }

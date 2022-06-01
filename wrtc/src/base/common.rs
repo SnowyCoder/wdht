@@ -1,18 +1,21 @@
-use tokio::sync::{oneshot, mpsc::{self, error::TrySendError}};
+use tokio::sync::{
+    mpsc::{self, error::TrySendError},
+    oneshot,
+};
 use tracing::debug;
 
-use crate::WrtcError;
-
+use crate::{Result, WrtcError};
 
 pub struct ChannelHandler {
-    ready_tx: Option<oneshot::Sender<Result<(), WrtcError>>>,
-    inbound_tx: mpsc::Sender<Result<Vec<u8>, WrtcError>>,
+    ready_tx: Option<oneshot::Sender<Result<()>>>,
+    inbound_tx: mpsc::Sender<Result<Vec<u8>>>,
 }
 
 impl ChannelHandler {
+    #![allow(clippy::type_complexity)]
     pub fn new() -> (
-        oneshot::Receiver<Result<(), WrtcError>>,
-        mpsc::Receiver<Result<Vec<u8>, WrtcError>>,
+        oneshot::Receiver<Result<()>>,
+        mpsc::Receiver<Result<Vec<u8>>>,
         Self,
     ) {
         let (ready_tx, ready_rx) = oneshot::channel();
@@ -29,14 +32,17 @@ impl ChannelHandler {
 
     pub fn open(&mut self) {
         // Signal open
-        let _ = self.ready_tx.take()
+        let _ = self
+            .ready_tx
+            .take()
             .expect("Channel already open")
             .send(Ok(()));
     }
 
     pub fn closed(&mut self) {
         debug!("Datachannel closed");
-        if let Err(TrySendError::Full(x)) = self.inbound_tx.try_send(Err(WrtcError::ConnectionLost)) {
+        if let Err(TrySendError::Full(x)) = self.inbound_tx.try_send(Err(WrtcError::ConnectionLost))
+        {
             let itx = self.inbound_tx.clone();
             tokio::spawn(async move { itx.send(x).await });
         }

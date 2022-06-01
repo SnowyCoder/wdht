@@ -1,19 +1,24 @@
-use std::{rc::Rc, cell::RefCell};
+use std::{cell::RefCell, rc::Rc};
 
-use js_sys::{Uint8Array, Reflect};
+use js_sys::{Reflect, Uint8Array};
 use send_wrapper::SendWrapper;
-use tokio::sync::{oneshot, mpsc};
+use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, instrument};
-use wasm_bindgen::{JsValue, prelude::Closure, JsCast};
+use wasm_bindgen::{prelude::Closure, JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
-use web_sys::{RtcPeerConnection, MessageEvent, RtcDataChannel, RtcDataChannelInit, RtcDataChannelType, RtcConfiguration, RtcIceGatheringState, RtcIceConnectionState};
+use web_sys::{
+    MessageEvent, RtcConfiguration, RtcDataChannel, RtcDataChannelInit, RtcDataChannelType,
+    RtcIceConnectionState, RtcIceGatheringState, RtcPeerConnection,
+};
 
-use crate::{WrtcError, ConnectionRole, SessionDescription as WrappedSessionDescription, WrtcChannel, WrtcDataChannel as WrappedWrtcDataChannel};
+use crate::{
+    ConnectionRole, SessionDescription as WrappedSessionDescription, WrtcChannel,
+    WrtcDataChannel as WrappedWrtcDataChannel, WrtcError,
+};
 
 use super::common::ChannelHandler;
 
 pub type SessionDescription = serde_json::Value;
-
 
 impl From<JsValue> for WrtcError {
     fn from(val: JsValue) -> Self {
@@ -55,11 +60,16 @@ impl WrtcDataChannel {
 }
 
 #[instrument(skip_all)]
-pub async fn create_channel<E>(config: &RtcConfig, role: ConnectionRole<E>, answer: oneshot::Sender<WrappedSessionDescription>) -> Result<WrtcChannel, E>
-    where E: From<WrtcError> {
-
+pub async fn create_channel<E>(
+    config: &RtcConfig,
+    role: ConnectionRole<E>,
+    answer: oneshot::Sender<WrappedSessionDescription>,
+) -> Result<WrtcChannel, E>
+where
+    E: From<WrtcError>,
+{
     let (connection, con_ready_rx) = create_connection(config, answer)?;
-    let (channel, chan_ready_rx, chan_inbound_rx)  = create_data_channel(&connection.connection);
+    let (channel, chan_ready_rx, chan_inbound_rx) = create_data_channel(&connection.connection);
 
     let conn = &connection.connection;
     match role {
@@ -74,11 +84,18 @@ pub async fn create_channel<E>(config: &RtcConfig, role: ConnectionRole<E>, answ
             debug!("Waiting for answer");
             let answer = answer_rx.await.map_err(|_| WrtcError::SignalingFailed)??;
             debug!("Answer received");
-            let js_answer = JsValue::from_serde(&answer).map_err(|_| WrtcError::InvalidDescription)?;
-            JsFuture::from(connection.connection.set_remote_description(&js_answer.into())).await
-        },
+            let js_answer =
+                JsValue::from_serde(&answer).map_err(|_| WrtcError::InvalidDescription)?;
+            JsFuture::from(
+                connection
+                    .connection
+                    .set_remote_description(&js_answer.into()),
+            )
+            .await
+        }
         ConnectionRole::Passive(offer) => {
-            let js_offer = JsValue::from_serde(&offer.0).map_err(|_| WrtcError::InvalidDescription)?;
+            let js_offer =
+                JsValue::from_serde(&offer.0).map_err(|_| WrtcError::InvalidDescription)?;
             JsFuture::from(conn.set_remote_description(&js_offer.into()))
                 .await
                 .map_err(|_| WrtcError::InvalidDescription)?;
@@ -86,8 +103,9 @@ pub async fn create_channel<E>(config: &RtcConfig, role: ConnectionRole<E>, answ
                 .await
                 .map_err(WrtcError::from)?;
             JsFuture::from(conn.set_local_description(answer.unchecked_ref())).await
-        },
-    }.map_err(|_| WrtcError::InvalidDescription)?;
+        }
+    }
+    .map_err(|_| WrtcError::InvalidDescription)?;
 
     debug!("Waiting for connection...");
     // Wait for the connection to open
@@ -96,7 +114,8 @@ pub async fn create_channel<E>(config: &RtcConfig, role: ConnectionRole<E>, answ
     }
     debug!("Wait for channel...");
     // Wait for the datachannel to be ready
-    chan_ready_rx.await
+    chan_ready_rx
+        .await
         .map_err(|_| WrtcError::SignalingFailed)??;
 
     debug!("Datachannel open");
@@ -108,11 +127,16 @@ pub async fn create_channel<E>(config: &RtcConfig, role: ConnectionRole<E>, answ
     })
 }
 
-fn create_data_channel(pc: &RtcPeerConnection) -> (DataChannelHandler, oneshot::Receiver<Result<(), WrtcError>>, mpsc::Receiver<Result<Vec<u8>, WrtcError>>) {
+#[allow(clippy::type_complexity)]
+fn create_data_channel(
+    pc: &RtcPeerConnection,
+) -> (
+    DataChannelHandler,
+    oneshot::Receiver<Result<(), WrtcError>>,
+    mpsc::Receiver<Result<Vec<u8>, WrtcError>>,
+) {
     let mut dc_config = RtcDataChannelInit::new();
-    dc_config.id(0)
-        .protocol("wrtc_json")
-        .negotiated(true);
+    dc_config.id(0).protocol("wrtc_json").negotiated(true);
     let dc = pc.create_data_channel_with_data_channel_dict("wdht", &dc_config);
     dc.set_binary_type(RtcDataChannelType::Arraybuffer);
 
@@ -126,7 +150,9 @@ fn create_data_channel(pc: &RtcPeerConnection) -> (DataChannelHandler, oneshot::
     }
 
     let handler = handler0.clone();
-    let onmessage = Closure::wrap(Box::new(move |ev: MessageEvent| on_message(&handler, ev)) as Box<dyn Fn(MessageEvent)>);
+    let onmessage = Closure::wrap(
+        Box::new(move |ev: MessageEvent| on_message(&handler, ev)) as Box<dyn Fn(MessageEvent)>
+    );
     dc.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
 
     let handler = handler0.clone();
@@ -134,10 +160,13 @@ fn create_data_channel(pc: &RtcPeerConnection) -> (DataChannelHandler, oneshot::
         // ev is a RTCErrorEvent, but it's not present in rust
         let error = Reflect::get(&ev, &JsValue::from_str("error"))
             .and_then(|x| Reflect::get(&x, &JsValue::from_str("errorDetail")))
-            .map(|x| x.as_string().unwrap_or_else(|| "Details are not a string".to_string()))
+            .map(|x| {
+                x.as_string()
+                    .unwrap_or_else(|| "Details are not a string".to_string())
+            })
             .unwrap_or_else(|_| "No details provided".to_string());
         handler.borrow_mut().error(error);
-    })  as Box<dyn Fn(JsValue)>);
+    }) as Box<dyn Fn(JsValue)>);
     dc.set_onerror(Some(onerror.as_ref().unchecked_ref()));
 
     let handler = handler0.clone();
@@ -217,7 +246,7 @@ fn create_connection(
         if RtcIceGatheringState::Complete == state {
             let signal_listener = match signal_tx.borrow_mut().take() {
                 Some(x) => x,
-                None => return,// Double listen (or we simply ignore the result)
+                None => return, // Double listen (or we simply ignore the result)
             };
 
             let sess_desc = match connection.local_description() {
@@ -229,7 +258,9 @@ fn create_connection(
             };
 
             // Ignore if signal is not needed
-            let description = sess_desc.into_serde().expect("Cannot convert local description to json");
+            let description = sess_desc
+                .into_serde()
+                .expect("Cannot convert local description to json");
             let _ = signal_listener.send(WrappedSessionDescription(description));
         }
     }) as Box<dyn Fn()>);

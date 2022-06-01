@@ -1,10 +1,13 @@
-use std::{collections::{HashMap, BinaryHeap}, time::Duration};
 use instant::Instant;
+use std::{
+    collections::{BinaryHeap, HashMap},
+    time::Duration,
+};
 
-use tracing::info;
 use thiserror::Error;
+use tracing::info;
 
-use crate::{id::Id, config::StorageConfig};
+use crate::{config::StorageConfig, id::Id};
 
 #[derive(Error, Debug)]
 #[non_exhaustive]
@@ -57,7 +60,12 @@ impl Storage {
         }
     }
 
-    pub fn check_entry(config: &StorageConfig, _id: &Id, lifetime: u32, data: &[u8]) -> Result<(), Error> {
+    pub fn check_entry(
+        config: &StorageConfig,
+        _id: &Id,
+        lifetime: u32,
+        data: &[u8],
+    ) -> Result<(), Error> {
         if data.len() > config.max_size {
             Err(Error::InvalidData)
         } else if lifetime > config.max_lifetime {
@@ -77,14 +85,13 @@ impl Storage {
         }
         info!("Inserting {id:?} for {lifetime}s");
 
-        let deadline = Instant::now()
-            .checked_add(Duration::from_secs(lifetime as u64));
+        let deadline = Instant::now().checked_add(Duration::from_secs(lifetime as u64));
         let deadline = match deadline {
             Some(x) => x,
             None => return Err(Error::InvalidLifetime),
         };
 
-        self.data.insert(id.clone(), data);
+        self.data.insert(id, data);
         self.deadlines.push((deadline, id));
 
         Ok(())

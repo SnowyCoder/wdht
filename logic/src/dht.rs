@@ -1,11 +1,20 @@
-use std::{sync::{RwLock, Mutex}, time::Duration};
+use std::{
+    sync::{Mutex, RwLock},
+    time::Duration,
+};
 
 use futures::{stream::FuturesUnordered, StreamExt};
-use tracing::{error, debug, info, warn, instrument, event, Level};
 use rand::Rng;
+use tracing::{debug, error, event, info, instrument, warn, Level};
 
-use crate::{ktree::KTree, config::SystemConfig, transport::{TransportSender, Request, Response, TransportListener, RawResponse, Contact}, id::Id, storage::Storage, search::{BasicSearch, BasicSearchOptions, SearchType, SearchResult}};
-
+use crate::{
+    config::SystemConfig,
+    id::Id,
+    ktree::KTree,
+    search::{BasicSearch, BasicSearchOptions, SearchResult, SearchType},
+    storage::Storage,
+    transport::{Contact, RawResponse, Request, Response, TransportListener, TransportSender},
+};
 
 // TODO: push syncronization down the line to improve async performance
 pub struct KademliaDht<T: TransportSender> {
@@ -14,7 +23,7 @@ pub struct KademliaDht<T: TransportSender> {
     id: Id,
     // Mutable runtime data
     pub transport: T,
-    pub tree: Mutex<KTree>,// TODO: dashmap?
+    pub tree: Mutex<KTree>, // TODO: dashmap?
     pub storage: RwLock<Storage>,
 }
 
@@ -22,7 +31,7 @@ impl<T: TransportSender> KademliaDht<T> {
     pub fn new(config: SystemConfig, id: Id, transport: T) -> Self {
         Self {
             config: config.clone(),
-            id: id.clone(),
+            id,
             transport,
             tree: Mutex::new(KTree::new(id, config.routing)),
             storage: RwLock::new(Storage::new(config.storage)),
@@ -46,15 +55,18 @@ impl<T: TransportSender> KademliaDht<T> {
     }
 
     fn get_closer_bucket(&self, key: Id) -> Vec<T::Contact> {
-        self.tree.lock().unwrap()
+        self.tree
+            .lock()
+            .unwrap()
             .get_closer_n(key, self.config.routing.bucket_size)
             .iter()
-            .map(|x| self.transport.wrap_contact((*x).clone()))
+            .map(|x| self.transport.wrap_contact(*x))
             .collect()
     }
 
     pub async fn query_value(&self, key: Id, options: BasicSearchOptions) -> Option<Vec<u8>> {
-        {// Check if it's already in storage
+        {
+            // Check if it's already in storage
             let storage = self.storage.read().unwrap();
             let data = storage.get(key);
             if let Some(data) = data {
@@ -80,33 +92,39 @@ impl<T: TransportSender> KademliaDht<T> {
     }
 
     pub async fn bootstrap<R: Rng>(&self, options: BasicSearchOptions, rng: &mut R) {
-        let nodes = self.query_nodes(self.id.clone(), options.clone()).await;
+        let nodes = self.query_nodes(self.id, options.clone()).await;
 
         // We are at index 0, because no-one can be closer than us
         // TODO: what about conflicts? We should be able to handle these
         let closest_sibling = match nodes.get(1) {
-            None => return,// DHT is empty, we are the only node
+            None => return, // DHT is empty, we are the only node
             Some(x) => x,
         };
 
-        let max_leading_zeros = (self.id ^ *closest_sibling.id()).leading_zeros();
+        let max_leading_zeros = (self.id ^ closest_sibling.id()).leading_zeros();
 
-        let mut fu = (0..max_leading_zeros).rev()
+        let mut fu = (0..max_leading_zeros)
+            .rev()
             .map(|bucket| {
                 let original_mask = Id::create_left_mask(bucket + 1);
                 // Keep original bucket - 1 bits, invert the bucket bit, randomically generate other bits
-                (self.id ^ Id::ZERO.set_bit(bucket) & original_mask) |
-                    (rng.gen::<Id>() & !original_mask)
+                (self.id ^ Id::ZERO.set_bit(bucket) & original_mask)
+                    | (rng.gen::<Id>() & !original_mask)
             })
             .map(|id| self.query_nodes(id, options.clone()))
             .collect::<FuturesUnordered<_>>();
 
-        while let Some(_) = fu.next().await {
+        while fu.next().await.is_some() {
             continue;
         }
     }
 
-    pub async fn insert(&self, key: Id, lifetime: Duration, value: Vec<u8>) -> Result<usize, crate::storage::Error> {
+    pub async fn insert(
+        &self,
+        key: Id,
+        lifetime: Duration,
+        value: Vec<u8>,
+    ) -> Result<usize, crate::storage::Error> {
         // Insert key in the k closest nodes
         let lifetime = lifetime.as_secs() as u32;
 
@@ -115,22 +133,30 @@ impl<T: TransportSender> KademliaDht<T> {
         info!("Inserting {key:?} into the network for {lifetime}s");
 
         let search_options = BasicSearchOptions { parallelism: 2 };
-        let nodes = self.query_nodes(key.clone(), search_options).await;
+        let nodes = self.query_nodes(key, search_options).await;
 
         let mut installation_count = 0;
 
-        if nodes.iter().any(|x| *x.id() == self.id) {
-            self.storage.write().unwrap().insert(key.clone(), lifetime, value.clone()).unwrap();
+        if nodes.iter().any(|x| x.id() == self.id) {
+            self.storage
+                .write()
+                .unwrap()
+                .insert(key, lifetime, value.clone())
+                .unwrap();
             installation_count += 1;
         }
 
         let request = Request::Insert(key, lifetime, value);
 
-        let mut answers = nodes.iter()
-            .filter(|x| *x.id() != self.id)
+        let mut answers = nodes
+            .iter()
+            .filter(|x| x.id() != self.id)
             .map(|x| async {
                 // tag the future (to know which clients started it)
-                (x.clone(), self.transport.send(x.id(), request.clone()).await)
+                (
+                    x.clone(),
+                    self.transport.send(x.id(), request.clone()).await,
+                )
             })
             .collect::<FuturesUnordered<_>>();
 
@@ -147,20 +173,15 @@ impl<T: TransportSender> KademliaDht<T> {
     }
 }
 
-
 impl<T: TransportSender> TransportListener for KademliaDht<T> {
     fn on_connect(&self, id: Id) -> bool {
         event!(Level::INFO, kad_id=%self.id, "Connnected {id}");
-        self.tree.lock()
-            .unwrap()
-            .insert(id, &self.transport)
+        self.tree.lock().unwrap().insert(id, &self.transport)
     }
 
     fn on_disconnect(&self, id: Id) {
         event!(Level::INFO, kad_id=%self.id, "Disconnected {id}");
-        self.tree.lock()
-            .unwrap()
-            .remove(id);
+        self.tree.lock().unwrap().remove(id);
     }
 
     #[instrument(skip(self), fields(kad_id=%self.id, %sender))]
@@ -173,9 +194,7 @@ impl<T: TransportSender> TransportListener for KademliaDht<T> {
             Request::FindNodes(x) => {
                 // TODO: how many nodes to search?
                 let found = tree.get_closer_n(x, self.config.routing.bucket_size);
-                let found = found.into_iter()
-                    .filter(|x| *x != sender)
-                    .collect();
+                let found = found.into_iter().filter(|x| *x != sender).collect();
 
                 debug!("| Find closer {:?}: {:?}", x, found);
                 Response::FoundNodes(found)
@@ -188,12 +207,11 @@ impl<T: TransportSender> TransportListener for KademliaDht<T> {
                 let res = match storage.get(x) {
                     Some(x) => Response::FoundData(x.clone()),
                     None => Response::FoundNodes(
-                        tree
-                            .get_closer_n(x, self.config.routing.bucket_size)
+                        tree.get_closer_n(x, self.config.routing.bucket_size)
                             .into_iter()
                             .filter(|x| *x != sender)
-                            .collect()
-                    )
+                            .collect(),
+                    ),
                 };
                 debug!("Find data {:?}: {:?}", x, res);
                 res

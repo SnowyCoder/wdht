@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
-use wdht_logic::{Id, transport::{Request, RawResponse}};
+use wdht_logic::{
+    transport::{RawResponse, Request},
+    Id,
+};
 use wdht_wrtc::SessionDescription;
 
 type WrtcOffer = SessionDescription;
@@ -14,12 +17,11 @@ pub struct HandshakeRequest {
 #[derive(Debug, Deserialize, Serialize)]
 pub enum HandshakeResponse {
     Ok {
-        my_id: Id
-        // TODO: encryption data
+        my_id: Id, // TODO: encryption data
     },
     Error {
         error: String,
-    }
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug)]

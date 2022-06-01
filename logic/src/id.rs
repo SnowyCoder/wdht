@@ -1,10 +1,14 @@
-use std::{fmt::{Debug, Display}, ops::{Shr, BitXor, BitAnd, BitOr, Not}, str::FromStr};
+use std::{
+    fmt::{Debug, Display},
+    ops::{BitAnd, BitOr, BitXor, Not, Shr},
+    str::FromStr,
+};
 
 use hex::FromHexError;
 use itertools::izip;
-use rand::{Rng, prelude::Distribution, distributions::Standard};
+use rand::{distributions::Standard, prelude::Distribution, Rng};
 #[cfg(feature = "serde")]
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 use crate::consts::ID_LEN;
 
@@ -15,8 +19,8 @@ pub struct Id(pub [u8; ID_LEN]);
 impl Serialize for Id {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
-        S: serde::Serializer {
-
+        S: serde::Serializer,
+    {
         if serializer.is_human_readable() {
             hex::serde::serialize(&self.0, serializer)
         } else {
@@ -29,7 +33,8 @@ impl Serialize for Id {
 impl<'de> Deserialize<'de> for Id {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
-        D: serde::Deserializer<'de> {
+        D: serde::Deserializer<'de>,
+    {
         let raw = if deserializer.is_human_readable() {
             hex::serde::deserialize(deserializer)?
         } else {
@@ -76,7 +81,7 @@ impl Id {
     pub const MAX: Id = Id([0xFF; ID_LEN]);
 
     pub fn create_left_mask(mut len: u8) -> Self {
-        let mut res = Self::ZERO.clone();
+        let mut res = Self::ZERO;
         let mut i = ID_LEN - 1;
         loop {
             if len > 8 {
@@ -135,8 +140,8 @@ impl Id {
         let byte = self.0[entryi];
         let firstlen = 8.min(len + bytei) - bytei;
         let secondlen = len - firstlen;
-        let res = (byte.wrapping_shr((8 - bytei - firstlen) as u32)) &
-                (!255u8.wrapping_shl(firstlen as u32));
+        let res = (byte.wrapping_shr((8 - bytei - firstlen) as u32))
+            & (!255u8.wrapping_shl(firstlen as u32));
         if secondlen == 0 {
             res
         } else {
@@ -193,7 +198,6 @@ impl Distribution<Id> for Standard {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,14 +230,12 @@ mod tests {
     #[test]
     fn op_mask() {
         let a = Id::create_left_mask(8);
-        assert_eq!(a.0[ID_LEN-1], 0xFF);
-        assert_eq!(a.0[ID_LEN-2], 0x00);
-
+        assert_eq!(a.0[ID_LEN - 1], 0xFF);
+        assert_eq!(a.0[ID_LEN - 2], 0x00);
 
         let a = Id::create_left_mask(11);
-        assert_eq!(a.0[ID_LEN-1], 0xFF);
-        assert_eq!(a.0[ID_LEN-2], 0x07);
-
+        assert_eq!(a.0[ID_LEN - 1], 0xFF);
+        assert_eq!(a.0[ID_LEN - 2], 0x07);
 
         let a = Id::ZERO.set_bit(0);
         assert_eq!(a.0[0], 0x80);
