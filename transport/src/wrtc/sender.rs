@@ -1,12 +1,12 @@
 use core::future::Future;
-use std::{sync::Arc, fmt::{Debug, Formatter}};
+use std::fmt::{Debug, Formatter};
 use tracing::warn;
 use wdht_logic::{transport::{TransportSender, Request, RawResponse, TransportError, Contact}, Id};
 
-use super::{Connections, protocol::{WrtcRequest, WrtcResponse}, conn::WrtcConnection};
+use super::{Connections, protocol::{WrtcRequest, WrtcResponse}, conn::WrtcConnection, wasync::Orc};
 
 
-async fn resolve_nodes(referrer: Arc<WrtcConnection>, conn: &Arc<Connections>, ids: Vec<Id>) -> Result<Vec<WrtcContact>, TransportError> {
+async fn resolve_nodes(referrer: Orc<WrtcConnection>, conn: &Orc<Connections>, ids: Vec<Id>) -> Result<Vec<WrtcContact>, TransportError> {
     // Collect old_contacts (contacts already known)
     // and contacts to query
     // old_contacts is a Vec<Option<WrtcContact>>, None elements are placeholders for
@@ -55,7 +55,7 @@ async fn resolve_nodes(referrer: Arc<WrtcConnection>, conn: &Arc<Connections>, i
     Ok(res)
 }
 
-async fn translate_response(contact: Arc<WrtcConnection>, conn: Arc<Connections>, res: RawResponse<Id>) -> Result<RawResponse<WrtcContact>, TransportError> {
+async fn translate_response(contact: Orc<WrtcConnection>, conn: Orc<Connections>, res: RawResponse<Id>) -> Result<RawResponse<WrtcContact>, TransportError> {
     use RawResponse::*;
     Ok(match res {
         FoundNodes(nodes) => FoundNodes(resolve_nodes(contact, &conn, nodes).await?),
@@ -67,7 +67,7 @@ async fn translate_response(contact: Arc<WrtcConnection>, conn: Arc<Connections>
 
 
 #[derive(Clone)]
-pub struct WrtcSender(pub(crate) Arc<Connections>);
+pub struct WrtcSender(pub(crate) Orc<Connections>);
 
 impl TransportSender for WrtcSender {
     fn ping(&self, _id: &Id) {
@@ -111,7 +111,7 @@ impl TransportSender for WrtcSender {
 #[derive(Clone)]
 pub enum WrtcContact {
     SelfId(Id),
-    Other(Arc<WrtcConnection>),
+    Other(Orc<WrtcConnection>),
 }
 
 impl Drop for WrtcContact {
@@ -122,7 +122,7 @@ impl Drop for WrtcContact {
         };
 
         // this + connection's
-        if Arc::strong_count(parent) != 2 {
+        if Orc::strong_count(parent) != 2 {
             return
         }
 

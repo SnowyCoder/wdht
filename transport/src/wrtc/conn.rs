@@ -1,21 +1,21 @@
-use std::{borrow::Cow, collections::HashMap, sync::{Weak, Mutex, Arc}, time::Duration, fmt::Debug};
+use std::{borrow::Cow, collections::HashMap, sync::Mutex, time::Duration, fmt::Debug};
 
-use datachannel::RtcDataChannel;
 use futures::future::join_all;
 use tracing::{warn, debug, info, Instrument, span, Level};
 use serde::Serialize;
 use thiserror::Error;
-use tokio::{sync::{oneshot, mpsc}, time::timeout};
+use tokio::sync::{oneshot, mpsc};
 use wdht_logic::{transport::{TransportError, TransportListener}, Id};
+use wdht_wrtc::{WrtcChannel, WrtcError, WrtcDataChannel};
 
-use super::{async_wrtc::{WrtcChannel, WrtcError, self, ChannelHandler}, protocol::{HandshakeRequest, HandshakeResponse, WrtcResponse, WrtcMessage, WrtcPayload, WrtcRequest}, Connections};
+use super::{protocol::{HandshakeRequest, HandshakeResponse, WrtcResponse, WrtcMessage, WrtcPayload, WrtcRequest}, Connections, WrtcTransportError, wasync::{Orc, Weak, spawn, sleep}};
 
 
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum PeerMessageError {
     #[error("Transport error: {0}")]
-    TransportError(WrtcError),
+    TransportError(WrtcTransportError),
     #[error("Wrong message format: {0}")]
     WrongFormat(serde_json::Error),
     #[error("Handshake error: {0}")]
@@ -30,6 +30,12 @@ pub enum PeerMessageError {
 
 impl From<WrtcError> for PeerMessageError {
     fn from(x: WrtcError) -> Self {
+        PeerMessageError::TransportError(x.into())
+    }
+}
+
+impl From<WrtcTransportError> for PeerMessageError {
+    fn from(x: WrtcTransportError) -> Self {
         PeerMessageError::TransportError(x)
     }
 }
@@ -56,7 +62,7 @@ pub async fn handshake_passive(conn: &mut WrtcChannel, id: Id) -> Result<Id, Pee
         my_id: id,
     };
     let msg = encode_data(&ans)?;
-    conn.data_channel.send(&msg)
+    conn.sender.send(&msg)
         .map_err(|_| WrtcError::ConnectionLost)?;
 
     Ok(peer_id)
@@ -66,7 +72,7 @@ pub async fn handshake_active(conn: &mut WrtcChannel, id: Id) -> Result<Id, Peer
     let msg = encode_data(&HandshakeRequest {
         my_id: id,
     })?;
-    conn.data_channel.send(&msg)
+    conn.sender.send(&msg)
         .map_err(|_| WrtcError::ConnectionLost)?;
 
     debug!("Waiting for handshake response...");
@@ -84,8 +90,7 @@ pub async fn handshake_active(conn: &mut WrtcChannel, id: Id) -> Result<Id, Peer
 struct InnerWrtcConnection {
     next_id: u32,
     responses: HashMap<u32, oneshot::Sender<Result<WrtcResponse, TransportError>>>,
-    _conn: async_wrtc::Connection,
-    channel: Box<RtcDataChannel<ChannelHandler>>,
+    channel: WrtcDataChannel,
     /// True when the connection is also used in routing tables (so we can't drop the connection)
     dont_cleanup: bool,
     /// If true the peer won't be issuing other requests but will still answer requests
@@ -151,20 +156,18 @@ pub struct WrtcConnection {
 }
 
 impl WrtcConnection {
-    pub fn new(peer_id: Id, channel: WrtcChannel, parent: Weak<Connections>) -> Arc<Self> {
+    pub fn new(peer_id: Id, channel: WrtcChannel, parent: Weak<Connections>) -> Orc<Self> {
         let kad_id = parent.upgrade().unwrap().dht.upgrade().unwrap().id();
         let WrtcChannel {
-            peer_connection,
-            data_channel,
+            sender,
             listener
         } = channel;
-        let res = Arc::new(Self {
+        let res = Orc::new(Self {
             peer_id,
             inner: Mutex::new(InnerWrtcConnection {
                 next_id: 0,
                 responses: HashMap::new(),
-                _conn: peer_connection,
-                channel: data_channel,
+                channel: sender,
                 dont_cleanup: false,
                 other_half_closed: false,
                 this_half_closed: false,
@@ -172,37 +175,35 @@ impl WrtcConnection {
             parent,
         });
 
-        tokio::spawn(
-            connection_listen(listener, Arc::downgrade(&res))
+        spawn(
+            connection_listen(listener, Orc::downgrade(&res))
             .instrument(span!(parent: None, Level::INFO, "kad_listener_wrtc", %kad_id, peer_id=%peer_id))
         );
         res
     }
 
-    pub async fn send_request(self: &Arc<Self>, mex: WrtcRequest) -> Result<WrtcResponse, TransportError> {
+    pub async fn send_request(self: &Orc<Self>, mex: WrtcRequest) -> Result<WrtcResponse, TransportError> {
         let reply = self.inner.lock().unwrap().send_request(mex);
 
-        let weak = Arc::downgrade(&self);
+        let weak = Orc::downgrade(&self);
         drop(self);
 
-        let duration = Duration::from_secs(10);
-        match timeout(duration, reply).await {
-            Ok(Err(_)) => {
-                return Err(TransportError::ConnectionLost);
-            },
-            Ok(Ok(x)) => {
-                x
-            },
-            Err(_) => {
+        tokio::select! {
+            _ = sleep(Duration::from_secs(10)) => {
                 // Timeout expired, connection is not alive
                 let this = match weak.upgrade() {
                     Some(x) => x,
                     None => return Err(TransportError::ConnectionLost),
                 };
                 this.shutdown("Timeout expired");
-                // TODO: Destroy connection
                 Err(TransportError::ConnectionLost)
-            },
+            }
+            x = reply => {
+                match x {
+                    Ok(x) => x,
+                    Err(_) => return Err(TransportError::ConnectionLost),
+                }
+            }
         }
     }
 
@@ -236,7 +237,7 @@ impl WrtcConnection {
     }
 
     /// Called when the last usable contact is lost, will try to close (or half-close) the connection
-    pub fn on_contact_lost(self: &Arc<Self>) {
+    pub fn on_contact_lost(self: &Orc<Self>) {
         let other_half_closed = {
             let mut inner = self.inner.lock().unwrap();
             if inner.dont_cleanup {
@@ -258,12 +259,12 @@ impl WrtcConnection {
         }
     }
 
-    pub fn set_dont_cleanup(self: &Arc<Self>, dont_cleanup: bool) {
+    pub fn set_dont_cleanup(self: &Orc<Self>, dont_cleanup: bool) {
         self.inner.lock().unwrap().dont_cleanup = dont_cleanup;
     }
 }
 
-fn process_message(msg: &[u8], conn: Arc<WrtcConnection>) -> Result<(), PeerMessageError> {
+fn process_message(msg: &[u8], conn: Orc<WrtcConnection>) -> Result<(), PeerMessageError> {
     let msg: WrtcMessage = serde_json::from_slice(&msg)?;
     debug!("Received message: {:?}", msg);
     let req = match msg.payload {
@@ -309,8 +310,8 @@ fn process_message(msg: &[u8], conn: Arc<WrtcConnection>) -> Result<(), PeerMess
                     }
                 }
             }));
-            let weak_ptr = Arc::downgrade(&conn);
-            tokio::spawn( async move {
+            let weak_ptr = Orc::downgrade(&conn);
+            spawn(async move {
                 let results = fut.await;
                 let connection = match weak_ptr.upgrade() {
                     Some(x) => x,
@@ -325,8 +326,8 @@ fn process_message(msg: &[u8], conn: Arc<WrtcConnection>) -> Result<(), PeerMess
                 return Ok(());
             }
 
-            let weak_ptr = Arc::downgrade(&conn);
-            tokio::spawn(async move {
+            let weak_ptr = Orc::downgrade(&conn);
+            spawn(async move {
                 let res = match root.create_passive(id, offer).await {
                     Ok((desc, _)) => WrtcResponse::OkAnswer(Ok(desc)),
                     Err(x) => WrtcResponse::OkAnswer(Err(x.to_string())),

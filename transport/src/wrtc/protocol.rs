@@ -1,6 +1,6 @@
-use datachannel::SessionDescription;
 use serde::{Deserialize, Serialize};
 use wdht_logic::{Id, transport::{Request, RawResponse}};
+use wdht_wrtc::SessionDescription;
 
 type WrtcOffer = SessionDescription;
 type WrtcAnswer = SessionDescription;

@@ -1,0 +1,47 @@
+[package]
+name = "wdht-wrtc"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+tokio = { version = "1.18", features = ["rt", "sync"] }
+thiserror = "1.0.30"
+tracing = "0.1.34"
+serde = { version = "1.0.137", features = ["derive"] }
+serde_json = "1.0.81"
+send_wrapper = { version = "0.5.0", features = ["futures"] }
+
+
+# Non-wasm dependencies
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+datachannel = { version = "0.7.6", default-features = false, features = ["tracing"] }
+
+# Wasm dependencies
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = { version = "0.2.80", features = ["serde-serialize"] }
+js-sys = "0.3"
+wasm-bindgen-futures = "0.4.30"
+send_wrapper = "0.5.0"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies.web-sys]
+version = "0.3.22"
+features = [
+    "ErrorEvent",
+    "MessageEvent",
+    "RtcPeerConnection",
+    "RtcSignalingState",
+    "RtcSdpType",
+    "RtcSessionDescriptionInit",
+    "RtcSessionDescription",
+    "RtcPeerConnectionIceEvent",
+    "RtcIceCandidate",
+    "RtcIceGatheringState",
+    "RtcIceConnectionState",
+    "RtcConfiguration",
+    "RtcDataChannel",
+    "RtcDataChannelEvent",
+    "RtcDataChannelInit",
+    "RtcDataChannelType",
+]

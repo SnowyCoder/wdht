@@ -34,7 +34,7 @@ impl Contact for Id {
 /// Object able to send messages to an id
 // Should use some sort of interior mutability and Refcounting
 // You must be able to send a Transport copy between boundaries! (Send)
-pub trait TransportSender : Clone + Send {
+pub trait TransportSender : Clone {
     /// Tries to ping an Id to check connection liveliness.
     ///
     /// This is not implemented as a normal message since we
@@ -46,7 +46,7 @@ pub trait TransportSender : Clone + Send {
     fn ping(&self, id: &Id);
 
     /// Future returned when sending a message to another peer
-    type Fut: Future<Output=Result<RawResponse<Self::Contact>, TransportError>> + Send;
+    type Fut: Future<Output=Result<RawResponse<Self::Contact>, TransportError>>;
 
     /// Sends a message to a peer and waits for the response
     ///

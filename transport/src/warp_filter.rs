@@ -4,7 +4,7 @@ use tracing::instrument;
 use warp::{cors, Filter};
 use wdht_logic::KademliaDht;
 
-use crate::{wrtc::{WrtcSender, async_wrtc::WrtcError}, http_api::{ConnectRequest, ConnectResponse}};
+use crate::{wrtc::{WrtcSender, WrtcTransportError}, http_api::{ConnectRequest, ConnectResponse}};
 
 #[instrument(level = "error", name = "http_kademlia", skip_all, fields(kad_id = %dht.id()))]
 async fn dht_connect_handle(dht: Arc<KademliaDht<WrtcSender>>, req: ConnectRequest) -> ConnectResponse<'static> {
@@ -12,7 +12,7 @@ async fn dht_connect_handle(dht: Arc<KademliaDht<WrtcSender>>, req: ConnectReque
         Ok((answer, _)) => ConnectResponse::Ok {
             answer,
         },
-        Err(WrtcError::ConnectionLimitReached) => ConnectResponse::Error {
+        Err(WrtcTransportError::ConnectionLimitReached) => ConnectResponse::Error {
             description: "Connection limit reached".into(),
         },
         Err(_) => ConnectResponse::Error {
@@ -31,5 +31,11 @@ pub fn dht_connect(
         .and(warp::body::json())
         .then(dht_connect_handle)
         .map(|x| warp::reply::json(&x))
-        .with(cors().allow_any_origin().build())
+        .with(
+            cors()
+                .allow_any_origin()
+                .allow_method("POST")
+                .allow_header("content-type")
+                .build()
+        )
 }

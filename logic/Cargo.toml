@@ -9,11 +9,12 @@ edition = "2021"
 itertools = "0.10.3"
 hex = { version = "0.4.3", features = [] }
 thiserror = "1.0.30"
-tokio = { version = "1.17.0", features = ["rt", "sync", "macros"] }
+tokio = { version = "1.18", features = ["rt", "sync", "macros"] }
 futures = { version = "0.3.21", features = ["alloc"], default-features = false }
 rand = { version = "0.8.5", default-features = false }
 serde = { version = "1.0.136", optional = true, features = ["derive"] }
 tracing = "0.1.34"
+instant = "0.1.12"
 
 [dev-dependencies]
 log = { version="*", features = ["max_level_trace"] }

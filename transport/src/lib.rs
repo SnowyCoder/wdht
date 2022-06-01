@@ -1,5 +1,5 @@
 #![feature(type_alias_impl_trait)]
-use std::{sync::Arc, error::Error, fmt::Display};
+use std::{error::Error, fmt::Display};
 
 use futures::future::join_all;
 use http_api::{ConnectResponse, ConnectRequest};
@@ -7,14 +7,16 @@ use tracing::info;
 use reqwest::IntoUrl;
 use wdht_logic::{config::SystemConfig, KademliaDht, Id, search::BasicSearchOptions};
 use wrtc::{WrtcSender, Connections};
+use wasync::Orc;
 
 pub mod wrtc;
+pub mod wasync;
 mod http_api;
-#[cfg(feature = "warp_filter")]
+#[cfg(feature = "warp")]
 pub mod warp_filter;
 
 
-async fn bootstrap_connect<T: IntoUrl>(url: T, connector: Arc<Connections>) -> Result<(), Box<dyn Error>> {
+async fn bootstrap_connect<T: IntoUrl>(url: T, connector: Orc<Connections>) -> Result<(), Box<dyn Error>> {
     let self_id = connector.self_id;
     let (offer, answer_tx, mut connection_rx) = connector.create_active(None).await?;
 
@@ -42,7 +44,7 @@ async fn bootstrap_connect<T: IntoUrl>(url: T, connector: Arc<Connections>) -> R
     Ok(())
 }
 
-pub async fn create_dht<T>(config: SystemConfig, id: Id, bootstrap: T) -> Arc<KademliaDht<WrtcSender>>
+pub async fn create_dht<T>(config: SystemConfig, id: Id, bootstrap: T) -> Orc<KademliaDht<WrtcSender>>
     where T: IntoIterator, <T as IntoIterator>::Item: IntoUrl + Clone + Display {
     let dht = wrtc::Connections::create(config, id);
 

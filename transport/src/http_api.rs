@@ -1,8 +1,8 @@
 use std::borrow::Cow;
 
-use datachannel::SessionDescription;
 use serde::{Serialize, Deserialize};
 use wdht_logic::Id;
+use wdht_wrtc::SessionDescription;
 
 
 #[derive(Debug, Serialize, Deserialize)]

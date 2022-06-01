@@ -1,13 +1,13 @@
-use std::{collections::{HashMap, hash_map::Entry}, sync::{Arc, Mutex}, iter};
+use std::{collections::{HashMap, hash_map::Entry}, sync::Mutex, iter};
 
-use datachannel::SessionDescription;
 use futures::future::join_all;
 use tracing::{error, event, Level};
 use tokio::sync::oneshot;
 use async_broadcast as broadcast;
 use wdht_logic::{Id, transport::TransportError};
+use wdht_wrtc::SessionDescription;
 
-use super::{WrtcContact, conn::WrtcConnection, Connections, protocol::{WrtcRequest, WrtcResponse}, async_wrtc::WrtcError};
+use super::{WrtcContact, conn::WrtcConnection, Connections, protocol::{WrtcRequest, WrtcResponse}, WrtcTransportError, wasync::Orc};
 
 pub type ContactResult = Result<WrtcContact, TransportError>;
 
@@ -17,7 +17,7 @@ pub struct CreatingConnectionSender {
     id: usize,
     message_sent: bool,
     channel: broadcast::Sender<ContactResult>,
-    owner: Option<Arc<WrtcConnector>>,
+    owner: Option<Orc<WrtcConnector>>,
 }
 
 impl CreatingConnectionSender {
@@ -60,7 +60,7 @@ impl Drop for CreatingConnectionSender {
     }
 }
 
-type WrtcChannelCreationData = oneshot::Sender<Result<SessionDescription, WrtcError>>;
+type WrtcChannelCreationData = oneshot::Sender<Result<SessionDescription, WrtcTransportError>>;
 
 #[derive(Default)]
 struct WrtcConnectorInner {
@@ -69,14 +69,14 @@ struct WrtcConnectorInner {
 }
 
 impl WrtcConnectorInner {
-    pub fn create_active(&mut self, parent: &Arc<WrtcConnector>, id: Id) -> (Option<CreatingConnectionSender>, broadcast::Receiver<ContactResult>) {
+    pub fn create_active(&mut self, parent: &Orc<WrtcConnector>, id: Id) -> (Option<CreatingConnectionSender>, broadcast::Receiver<ContactResult>) {
         if let Some(x) = self.connecting.get(&id) {
             return (None, x.clone().0);
         }
         self.create_passive(parent, id)
     }
 
-    pub fn create_passive(&mut self, parent: &Arc<WrtcConnector>, id: Id) -> (Option<CreatingConnectionSender>, broadcast::Receiver<ContactResult>) {
+    pub fn create_passive(&mut self, parent: &Orc<WrtcConnector>, id: Id) -> (Option<CreatingConnectionSender>, broadcast::Receiver<ContactResult>) {
         let entry = self.connecting.entry(id);
         match entry {
             Entry::Occupied(mut entry) => {
@@ -135,9 +135,9 @@ impl WrtcConnector {
         }
     }
 
-    async fn connect_to(&self, conn: &Arc<Connections>, ids: Vec<(Id, CreatingConnectionSender)>, referrer: Arc<WrtcConnection>) {
+    async fn connect_to(&self, conn: &Orc<Connections>, ids: Vec<(Id, CreatingConnectionSender)>, referrer: Orc<WrtcConnection>) {
         // function to call before error-returning, it will kill all intermediary data
-        let shutdown = |err: WrtcError, data: Vec<WrtcChannelCreationData>| {
+        let shutdown = |err: WrtcTransportError, data: Vec<WrtcChannelCreationData>| {
             for x in data {
                 let _ = x.send(Err(err.clone()));
             }
@@ -177,7 +177,7 @@ impl WrtcConnector {
         let res = match res {
             Ok(x) => x,
             Err(x) => {
-                shutdown(WrtcError::Transport(x), middle_data);
+                shutdown(WrtcTransportError::Transport(x), middle_data);
                 return
             }
         };
@@ -185,7 +185,7 @@ impl WrtcConnector {
         let res = match res {
             WrtcResponse::ForwardAnswers(x) => x,
             _ => {
-                shutdown(WrtcError::InvalidMessage, middle_data);
+                shutdown(WrtcTransportError::InvalidMessage, middle_data);
                 return
             }
         };
@@ -215,7 +215,7 @@ impl WrtcConnector {
             });
     }
 
-    pub async fn connect_all(self: &Arc<Self>, conn: &Arc<Connections>, referrer: Arc<WrtcConnection>, ids: Vec<Id>) -> Vec<ContactResult> {
+    pub async fn connect_all(self: &Orc<Self>, conn: &Orc<Connections>, referrer: Orc<WrtcConnection>, ids: Vec<Id>) -> Vec<ContactResult> {
         let mut to_send = Vec::<(Id, CreatingConnectionSender)>::new();
         let contacts = {
             let mut inner = self.inner.lock().unwrap();
@@ -244,7 +244,7 @@ impl WrtcConnector {
         self.inner.lock().unwrap().connecting.contains_key(&id)
     }
 
-    pub fn create_unknown(self: &Arc<Self>) -> (CreatingConnectionSender, broadcast::Receiver<ContactResult>) {
+    pub fn create_unknown(self: &Orc<Self>) -> (CreatingConnectionSender, broadcast::Receiver<ContactResult>) {
         let (sender, receiver) = broadcast::broadcast(1);
         (CreatingConnectionSender {
             peer_id: None,
@@ -255,12 +255,12 @@ impl WrtcConnector {
         }, receiver)
     }
 
-    pub fn create_active(self: &Arc<Self>, id: Id) -> (Option<CreatingConnectionSender>, broadcast::Receiver<ContactResult>) {
+    pub fn create_active(self: &Orc<Self>, id: Id) -> (Option<CreatingConnectionSender>, broadcast::Receiver<ContactResult>) {
         let mut conns = self.inner.lock().unwrap();
         conns.create_active(self, id)
     }
 
-    pub fn create_passive(self: &Arc<Self>, id: Id) -> (Option<CreatingConnectionSender>, broadcast::Receiver<ContactResult>) {
+    pub fn create_passive(self: &Orc<Self>, id: Id) -> (Option<CreatingConnectionSender>, broadcast::Receiver<ContactResult>) {
         let mut conns = self.inner.lock().unwrap();
         conns.create_passive(self, id)
     }

@@ -1,4 +1,5 @@
-use std::{collections::{HashMap, BinaryHeap}, time::{Instant, Duration}};
+use std::{collections::{HashMap, BinaryHeap}, time::Duration};
+use instant::Instant;
 
 use tracing::info;
 use thiserror::Error;
