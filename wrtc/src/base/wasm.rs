@@ -1,19 +1,18 @@
-use std::{collections::HashMap, rc::Rc, cell::RefCell};
+use std::{rc::Rc, cell::RefCell};
 
-use js_sys::{Uint8Array, Array};
+use js_sys::{Uint8Array, Reflect};
 use send_wrapper::SendWrapper;
 use tokio::sync::{oneshot, mpsc};
-use tracing::{debug, error, info, instrument};
+use tracing::{debug, error, instrument};
 use wasm_bindgen::{JsValue, prelude::Closure, JsCast};
 use wasm_bindgen_futures::JsFuture;
-use web_sys::{RtcPeerConnection, MessageEvent, ErrorEvent, RtcDataChannel, RtcDataChannelInit, RtcDataChannelType, RtcConfiguration, RtcIceGatheringState, RtcIceConnectionState, RtcSessionDescriptionInit, RtcSdpType};
+use web_sys::{RtcPeerConnection, MessageEvent, RtcDataChannel, RtcDataChannelInit, RtcDataChannelType, RtcConfiguration, RtcIceGatheringState, RtcIceConnectionState};
 
 use crate::{WrtcError, ConnectionRole, SessionDescription as WrappedSessionDescription, WrtcChannel, WrtcDataChannel as WrappedWrtcDataChannel};
 
 use super::common::ChannelHandler;
 
 pub type SessionDescription = serde_json::Value;
-
 
 
 impl From<JsValue> for WrtcError {
@@ -66,8 +65,11 @@ pub async fn create_channel<E>(config: &RtcConfig, role: ConnectionRole<E>, answ
     match role {
         ConnectionRole::Active(answer_rx) => {
             debug!("Creating offer");
-            let offer = JsFuture::from(conn.create_offer()).await.map_err(WrtcError::from)?;;
-            JsFuture::from(conn.set_local_description(offer.unchecked_ref())).await
+            let offer = JsFuture::from(conn.create_offer())
+                .await
+                .map_err(WrtcError::from)?;
+            JsFuture::from(conn.set_local_description(offer.unchecked_ref()))
+                .await
                 .map_err(WrtcError::from)?;
             debug!("Waiting for answer");
             let answer = answer_rx.await.map_err(|_| WrtcError::SignalingFailed)??;
@@ -77,11 +79,13 @@ pub async fn create_channel<E>(config: &RtcConfig, role: ConnectionRole<E>, answ
         },
         ConnectionRole::Passive(offer) => {
             let js_offer = JsValue::from_serde(&offer.0).map_err(|_| WrtcError::InvalidDescription)?;
-            JsFuture::from(
-                connection.connection.set_remote_description(&js_offer.into())
-            ).await.map_err(|_| WrtcError::InvalidDescription)?;
-            debug!("Creating anwer");
-            JsFuture::from(connection.connection.set_local_description(&RtcSessionDescriptionInit::new(RtcSdpType::Answer))).await
+            JsFuture::from(conn.set_remote_description(&js_offer.into()))
+                .await
+                .map_err(|_| WrtcError::InvalidDescription)?;
+            let answer = JsFuture::from(conn.create_answer())
+                .await
+                .map_err(WrtcError::from)?;
+            JsFuture::from(conn.set_local_description(answer.unchecked_ref())).await
         },
     }.map_err(|_| WrtcError::InvalidDescription)?;
 
@@ -126,9 +130,14 @@ fn create_data_channel(pc: &RtcPeerConnection) -> (DataChannelHandler, oneshot::
     dc.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
 
     let handler = handler0.clone();
-    let onerror = Closure::wrap(Box::new(move |ev: ErrorEvent| {
-        handler.borrow_mut().error(ev.message());
-    })  as Box<dyn Fn(ErrorEvent)>);
+    let onerror = Closure::wrap(Box::new(move |ev: JsValue| {
+        // ev is a RTCErrorEvent, but it's not present in rust
+        let error = Reflect::get(&ev, &JsValue::from_str("error"))
+            .and_then(|x| Reflect::get(&x, &JsValue::from_str("errorDetail")))
+            .map(|x| x.as_string().unwrap_or_else(|| "Details are not a string".to_string()))
+            .unwrap_or_else(|_| "No details provided".to_string());
+        handler.borrow_mut().error(error);
+    })  as Box<dyn Fn(JsValue)>);
     dc.set_onerror(Some(onerror.as_ref().unchecked_ref()));
 
     let handler = handler0.clone();
@@ -157,15 +166,18 @@ struct DataChannelHandler {
     channel: RtcDataChannel,
     _handler: Rc<RefCell<ChannelHandler>>,
     _onmessage: Closure<dyn Fn(MessageEvent)>,
-    _onerror: Closure<dyn Fn(ErrorEvent)>,
+    _onerror: Closure<dyn Fn(JsValue)>,
     _onopen: Closure<dyn Fn()>,
     _onclose: Closure<dyn Fn()>,
 }
 
-struct ConnectionHandler {
-    connection: Rc<RtcPeerConnection>,
-    _oniceconnectionstatechange: Closure<dyn Fn()>,
-    _onicegatheringstatechange: Closure<dyn Fn()>,
+impl Drop for DataChannelHandler {
+    fn drop(&mut self) {
+        self.channel.set_onmessage(None);
+        self.channel.set_onerror(None);
+        self.channel.set_onopen(None);
+        self.channel.set_onclose(None);
+    }
 }
 
 fn create_connection(
@@ -229,4 +241,17 @@ fn create_connection(
         _onicegatheringstatechange: onicegatheringstatechange,
     };
     Ok((handler, ready_rx))
+}
+
+struct ConnectionHandler {
+    connection: Rc<RtcPeerConnection>,
+    _oniceconnectionstatechange: Closure<dyn Fn()>,
+    _onicegatheringstatechange: Closure<dyn Fn()>,
+}
+
+impl Drop for ConnectionHandler {
+    fn drop(&mut self) {
+        self.connection.set_oniceconnectionstatechange(None);
+        self.connection.set_onicegatheringstatechange(None);
+    }
 }

@@ -1,7 +1,5 @@
 mod utils;
 
-use std::time::Duration;
-
 use gloo_timers::future::TimeoutFuture;
 use rand::{thread_rng, Rng};
 use utils::set_panic_hook;
@@ -19,7 +17,6 @@ static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
 #[wasm_bindgen]
 pub fn greet() {
     set_panic_hook();
-    let s = format!("Hello, web-dht!, {}", 3 + 4);
     spawn_local(test_kad());
 }
 
