@@ -8,7 +8,7 @@ use wasm_bindgen::{prelude::Closure, JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{
     MessageEvent, RtcConfiguration, RtcDataChannel, RtcDataChannelInit, RtcDataChannelType,
-    RtcIceConnectionState, RtcIceGatheringState, RtcPeerConnection,
+    RtcIceConnectionState, RtcPeerConnection, RtcPeerConnectionIceEvent
 };
 
 use crate::{
@@ -239,11 +239,9 @@ fn create_connection(
 
     let connection = pc.clone();
     let signal_tx = RefCell::new(Some(signal_tx));
-    let onicegatheringstatechange = Closure::wrap(Box::new(move || {
-        let state = connection.ice_gathering_state();
-
-        debug!("ICE gathering state change {state:?}");
-        if RtcIceGatheringState::Complete == state {
+    let onicecandidate = Closure::wrap(Box::new(move |ev: RtcPeerConnectionIceEvent| {
+        if ev.candidate().is_none() {
+            debug!("ICE gathering candidates complete!");
             let signal_listener = match signal_tx.borrow_mut().take() {
                 Some(x) => x,
                 None => return, // Double listen (or we simply ignore the result)
@@ -263,13 +261,13 @@ fn create_connection(
                 .expect("Cannot convert local description to json");
             let _ = signal_listener.send(WrappedSessionDescription(description));
         }
-    }) as Box<dyn Fn()>);
-    pc.set_onicegatheringstatechange(Some(onicegatheringstatechange.as_ref().unchecked_ref()));
+    }) as Box<dyn Fn(RtcPeerConnectionIceEvent)>);
+    pc.set_onicecandidate(Some(onicecandidate.as_ref().unchecked_ref()));
 
     let handler = ConnectionHandler {
         connection: pc,
         _oniceconnectionstatechange: oniceconnectionstatechange,
-        _onicegatheringstatechange: onicegatheringstatechange,
+        _onicecandidate: onicecandidate,
     };
     Ok((handler, ready_rx))
 }
@@ -277,12 +275,12 @@ fn create_connection(
 struct ConnectionHandler {
     connection: Rc<RtcPeerConnection>,
     _oniceconnectionstatechange: Closure<dyn Fn()>,
-    _onicegatheringstatechange: Closure<dyn Fn()>,
+    _onicecandidate: Closure<dyn Fn(RtcPeerConnectionIceEvent)>,
 }
 
 impl Drop for ConnectionHandler {
     fn drop(&mut self) {
         self.connection.set_oniceconnectionstatechange(None);
-        self.connection.set_onicegatheringstatechange(None);
+        self.connection.set_onicecandidate(None);
     }
 }

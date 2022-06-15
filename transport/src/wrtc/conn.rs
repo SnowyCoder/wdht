@@ -206,7 +206,7 @@ impl WrtcConnection {
         drop(self);
 
         tokio::select! {
-            _ = sleep(Duration::from_secs(10)) => {
+            _ = sleep(Duration::from_secs(10 * 60)) => {
                 // Timeout expired, connection is not alive
                 let this = match weak.upgrade() {
                     Some(x) => x,

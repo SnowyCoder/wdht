@@ -4,7 +4,7 @@ use std::{
     sync::{
         atomic::{AtomicU64, Ordering},
         Mutex,
-    },
+    }, time::Duration,
 };
 
 use async_broadcast as broadcast;
@@ -23,7 +23,7 @@ use wdht_wrtc::{
 use self::{
     conn::{PeerMessageError, WrtcConnection},
     connector::{ContactResult, CreatingConnectionSender, WrtcConnector},
-    wasync::{spawn, Orc, Weak},
+    wasync::{spawn, Orc, Weak, sleep},
 };
 
 use super::wasync;
@@ -179,7 +179,12 @@ impl Connections {
         is_active: bool,
         conn_tx: CreatingConnectionSender,
     ) {
-        let channel = create_channel(&RTC_CONFIG, role, answer_tx).await;
+        let channel = tokio::select! {
+            _ = sleep(Duration::from_secs(60)) => {
+                Err(TransportError::ConnectionLost.into())
+            },
+            channel = create_channel(&RTC_CONFIG, role, answer_tx) => channel,
+        };
 
         let this = match this.upgrade() {
             Some(x) => x,
@@ -232,6 +237,7 @@ impl Connections {
         ));
 
         debug!("Waiting for passive answer...");
+
         answer_rx.await.map(|x| (x, conn_rx)).map_err(|_| {
             this.upgrade()
                 .map(|x| x.connection_count.fetch_sub(1, Ordering::SeqCst));

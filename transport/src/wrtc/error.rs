@@ -26,6 +26,12 @@ impl From<WrtcError> for WrtcTransportError {
     }
 }
 
+impl From<TransportError> for WrtcTransportError {
+    fn from(x: TransportError) -> Self {
+        WrtcTransportError::Transport(x)
+    }
+}
+
 impl From<&'static str> for WrtcTransportError {
     fn from(x: &'static str) -> Self {
         WrtcTransportError::UnknownError(x.into())
