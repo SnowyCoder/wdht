@@ -13,7 +13,7 @@ use crate::{
     ktree::KTree,
     search::{BasicSearch, BasicSearchOptions, SearchResult, SearchType},
     storage::Storage,
-    transport::{Contact, RawResponse, Request, Response, TransportListener, TransportSender},
+    transport::{Contact, RawResponse, Request, Response, TransportListener, TransportSender, TopicEntry},
 };
 
 // TODO: push syncronization down the line to improve async performance
@@ -64,7 +64,7 @@ impl<T: TransportSender> KademliaDht<T> {
             .collect()
     }
 
-    pub async fn query_value(&self, key: Id, options: BasicSearchOptions) -> Option<Vec<u8>> {
+    pub async fn query_value(&self, key: Id, max_entry_count: u32, options: BasicSearchOptions) -> Option<Vec<TopicEntry>> {
         {
             // Check if it's already in storage
             let storage = self.storage.read().unwrap();
@@ -75,7 +75,7 @@ impl<T: TransportSender> KademliaDht<T> {
         }
 
         let bucket = self.get_closer_bucket(key);
-        let searcher = BasicSearch::create(self, options, SearchType::Data, key);
+        let searcher = BasicSearch::create(self, options, SearchType::Data(max_entry_count), key);
         match searcher.search(bucket).await {
             SearchResult::CloserNodes(_) => None,
             SearchResult::DataFound(x) => Some(x),
@@ -119,35 +119,7 @@ impl<T: TransportSender> KademliaDht<T> {
         }
     }
 
-    pub async fn insert(
-        &self,
-        key: Id,
-        lifetime: Duration,
-        value: Vec<u8>,
-    ) -> Result<usize, crate::storage::Error> {
-        // Insert key in the k closest nodes
-        let lifetime = lifetime.as_secs() as u32;
-
-        Storage::check_entry(&self.config.storage, &key, lifetime, &value)?;
-
-        info!("Inserting {key:?} into the network for {lifetime}s");
-
-        let search_options = BasicSearchOptions { parallelism: 2 };
-        let nodes = self.query_nodes(key, search_options).await;
-
-        let mut installation_count = 0;
-
-        if nodes.iter().any(|x| x.id() == self.id) {
-            self.storage
-                .write()
-                .unwrap()
-                .insert(key, lifetime, value.clone())
-                .unwrap();
-            installation_count += 1;
-        }
-
-        let request = Request::Insert(key, lifetime, value);
-
+    async fn send_request_and_count(&self, nodes: Vec<T::Contact>, request: Request) -> usize {
         let mut answers = nodes
             .iter()
             .filter(|x| x.id() != self.id)
@@ -160,16 +132,74 @@ impl<T: TransportSender> KademliaDht<T> {
             })
             .collect::<FuturesUnordered<_>>();
 
+        let mut count = 0;
+
         while let Some((id, x)) = answers.next().await {
             match x {
-                Ok(RawResponse::Done) => installation_count += 1,
+                Ok(RawResponse::Done) => count += 1,
                 Ok(RawResponse::Error) => warn!("{id:?} returned an error"),
                 Ok(_) => warn!("Unknown response received from {id:?}"),
                 Err(x) => warn!("Transport error querying {id:?}: {x}"),
             }
         }
 
+        count
+    }
+
+    pub async fn insert(
+        &self,
+        key: Id,
+        lifetime: Duration,
+        value: Vec<u8>,
+    ) -> Result<usize, crate::storage::Error> {
+        // Insert key in the k closest nodes
+        let lifetime = lifetime.as_secs() as u32;
+
+        Storage::check_entry(&self.config.storage, key, self.id, lifetime, &value)?;
+
+        info!("Inserting {key:?} into the network for {lifetime}s -> '{value:x?}'");
+
+        let search_options = BasicSearchOptions { parallelism: 2 };
+        let nodes = self.query_nodes(key, search_options).await;
+
+        let mut installation_count = 0;
+
+        if nodes.iter().any(|x| x.id() == self.id) {
+            self.storage
+                .write()
+                .unwrap()
+                .insert(key, self.id, lifetime, value.clone())
+                .unwrap();
+            installation_count += 1;
+        }
+
+        let request = Request::Insert(key, lifetime, value);
+
+        installation_count += self.send_request_and_count(nodes, request).await;
+
         Ok(installation_count)
+    }
+
+    pub async fn remove(&self, key: Id) -> usize {
+        info!("Removing {key:?} into the network");
+
+        let search_options = BasicSearchOptions { parallelism: 2 };
+        let nodes = self.query_nodes(key, search_options).await;
+
+        let mut removed_count = 0;
+
+        if nodes.iter().any(|x| x.id() == self.id) {
+            self.storage
+                .write()
+                .unwrap()
+                .remove(key, self.id);
+                removed_count += 1;
+        }
+
+        let request = Request::Remove(key);
+
+        removed_count += self.send_request_and_count(nodes, request).await;
+        removed_count
     }
 }
 
@@ -191,43 +221,56 @@ impl<T: TransportSender> TransportListener for KademliaDht<T> {
         tree.refresh(sender);
 
         match message {
-            Request::FindNodes(x) => {
+            Request::FindNodes(topic) => {
                 // TODO: how many nodes to search?
-                let found = tree.get_closer_n(x, self.config.routing.bucket_size);
+                let found = tree.get_closer_n(topic, self.config.routing.bucket_size);
                 let found = found.into_iter().filter(|x| *x != sender).collect();
 
-                debug!("| Find closer {:?}: {:?}", x, found);
+                debug!("| Find closer {topic:?}: {found:?}");
                 Response::FoundNodes(found)
             }
 
-            Request::FindData(x) => {
+            Request::FindData(topic, limit) => {
                 // Send data if stored
                 // Else send closer nodes known
                 let storage = self.storage.read().unwrap();
-                let res = match storage.get(x) {
-                    Some(x) => Response::FoundData(x.clone()),
+                let res = match storage.get(topic) {
+                    Some(entries) => Response::FoundData(
+                        entries.iter()
+                            // Always get the last entries (skip the first entries - limit entries)
+                            .skip(entries.len().saturating_sub(limit as usize))
+                            .cloned()
+                            .collect()
+                    ),
                     None => Response::FoundNodes(
-                        tree.get_closer_n(x, self.config.routing.bucket_size)
+                        tree.get_closer_n(topic, self.config.routing.bucket_size)
                             .into_iter()
                             .filter(|x| *x != sender)
                             .collect(),
                     ),
                 };
-                debug!("Find data {:?}: {:?}", x, res);
+                debug!("Find data {topic:?}({limit}): {res:?}");
                 res
             }
 
-            Request::Insert(file_id, lifetime, data) => {
+            Request::Insert(topic, lifetime, data) => {
                 // TODO: protection against SPAM attacks? (ex. merkle challenges?)
-                debug!("Inserting value {:?} {} {:x?}", file_id, lifetime, data);
+                debug!("| Insert {topic:?} {lifetime}s -> '{data:x?}'");
                 let mut storage = self.storage.write().unwrap();
-                match storage.insert(file_id, lifetime, data) {
+                match storage.insert(topic, sender, lifetime, data) {
                     Ok(_) => Response::Done,
                     Err(x) => {
-                        error!("Error inserting value: {}", x);
+                        error!("Error inserting value: {x}");
                         Response::Error
                     }
                 }
+            }
+
+            Request::Remove(topic) => {
+                debug!("| Remove {topic:?}");
+                let mut storage = self.storage.write().unwrap();
+                storage.remove(topic, sender);
+                Response::Done
             }
         }
     }

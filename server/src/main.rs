@@ -5,7 +5,7 @@ use reqwest::Url;
 use tracing::{info, span, Instrument, Level};
 use tracing_subscriber::{prelude::*, EnvFilter};
 use wdht_logic::{config::SystemConfig, Id, KademliaDht};
-use wdht_transport::{create_dht, warp_filter::dht_connect, wrtc::WrtcSender};
+use wdht_transport::{create_dht, warp_filter::dht_connect, wrtc::WrtcSender, ShutdownSender};
 
 use clap::{Args, Parser, Subcommand};
 use itertools::Itertools;
@@ -83,7 +83,7 @@ async fn main() {
     }
 }
 
-async fn start_kademlia(args: &CommonArgs, id: Option<Id>) -> Arc<KademliaDht<WrtcSender>> {
+async fn start_kademlia(args: &CommonArgs, id: Option<Id>) -> (Arc<KademliaDht<WrtcSender>>, ShutdownSender) {
     let id = id.unwrap_or_else(|| thread_rng().gen());
 
     let mut config: SystemConfig = Default::default();
@@ -117,7 +117,7 @@ async fn start_client(args: &ClientArgs) {
 }
 
 async fn start_server(args: &ServerArgs) {
-    let kad = start_kademlia(&args.common, args.id).await;
+    let (kad, _shutdown) = start_kademlia(&args.common, args.id).await;
     info!("Starting up server");
 
     warp::serve(dht_connect(kad)).run(args.bind).await;

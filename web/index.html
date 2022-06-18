@@ -6,11 +6,28 @@
   </head>
   <body>
     <script type="module">
-      import init, {greet} from "./pkg/web_dht_wasm.js";
-      init()
-        .then(() => {
-          greet()
-        });
+      import init, {WebDht} from "./pkg/web_dht_wasm.js";
+
+      async function main() {
+        await init();
+        let encoder = new TextEncoder("utf-8");
+        let decoder = new TextDecoder("utf-8");
+        let query_hash = "f5a7d2ab3bea66eaf40f0ca21c07c69d85015e04";
+
+        let data = encoder.encode("this seems like it's working!");
+
+        let dht = await new WebDht(["http://localhost:3141"]);
+        console.log(dht);
+        let insertion_count = await dht.insert(query_hash, 10.0, data);
+
+        console.log("Inserted: ", insertion_count);
+
+        let retrieved = await dht.query(query_hash, 10);
+        console.log("Retrieved: ", decoder.decode(retrieved[0].data));
+        window.dht = dht;
+      }
+      main()
     </script>
+    <!--script src="test.js"></script-->
   </body>
 </html>

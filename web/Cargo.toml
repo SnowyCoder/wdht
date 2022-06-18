@@ -1,11 +1,8 @@
-cargo-features = ["per-package-target"]
-
 [package]
 name = "web-dht-wasm"
 version = "0.1.0"
 authors = ["Rossi Lorenzo <snowycoder@gmail.com>"]
 edition = "2021"
-forced-target = "wasm32-unknown-unknown"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -27,5 +24,6 @@ parking_lot = { version = "0.11.1", features = ["wasm-bindgen"]}
 tracing-wasm = "0.2.1"
 console_error_panic_hook = { version = "0.1.7", optional = true }
 gloo-timers = { version = "0.2.4", features = ["futures"] }
+js-sys = "0.3.58"
+tracing = { version = "0.1.35", features = ["max_level_info", "release_max_level_warn"] }
 
-[dev-dependencies]

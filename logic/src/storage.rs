@@ -1,13 +1,14 @@
 use instant::Instant;
+use priority_queue::PriorityQueue;
 use std::{
-    collections::{BinaryHeap, HashMap},
+    collections::{HashMap, hash_map::Entry},
     time::Duration,
 };
 
 use thiserror::Error;
 use tracing::info;
 
-use crate::{config::StorageConfig, id::Id};
+use crate::{config::StorageConfig, id::Id, transport::TopicEntry};
 
 #[derive(Error, Debug)]
 #[non_exhaustive]
@@ -20,13 +21,12 @@ pub enum Error {
     InvalidData,
 }
 
-// TODO: would it be better to have an opaque redirection layer? (ex: Id -> usize)
-// TODO: add append-like storage
 #[derive(Clone, Debug)]
 pub struct Storage {
     config: StorageConfig,
-    data: HashMap<Id, Vec<u8>>,
-    deadlines: BinaryHeap<(Instant, Id)>,
+    entry_count: usize,
+    topics: HashMap<Id, Vec<TopicEntry>>,
+    deadlines: PriorityQueue<(Id, Id), Instant>,
     // TODO: cache
     // cache: HashMap<Id, Vec<u8>>,
     // cache_deadlines: BinaryHeap<(Instant, Id)>,
@@ -36,33 +36,35 @@ impl Storage {
     pub fn new(config: StorageConfig) -> Self {
         Storage {
             config,
-            data: Default::default(),
+            entry_count: 0,
+            topics: Default::default(),
             deadlines: Default::default(),
         }
     }
 
-    pub fn get(&self, id: Id) -> Option<&Vec<u8>> {
-        self.data.get(&id)
+    pub fn get(&self, id: Id) -> Option<&Vec<TopicEntry>> {
+        self.topics.get(&id)
     }
 
     pub fn periodic_run(&mut self) {
         let now = Instant::now();
         // Remove old entries
-        while let Some((deadline, id)) = self.deadlines.peek() {
+        while let Some(((topic, user), deadline)) = self.deadlines.peek() {
             if *deadline > now {
                 break;
             }
 
-            info!("Removing {id:?}");
+            info!("Removing topic: {topic:?} user: {user:?}");
 
-            let id = self.deadlines.pop().unwrap().1;
-            self.data.remove(&id);
+            let id = self.deadlines.pop().unwrap().0;
+            self.remove(id.0, id.1);
         }
     }
 
     pub fn check_entry(
         config: &StorageConfig,
-        _id: &Id,
+        _topic: Id,
+        _sender: Id,
         lifetime: u32,
         data: &[u8],
     ) -> Result<(), Error> {
@@ -75,15 +77,17 @@ impl Storage {
         }
     }
 
-    pub fn insert(&mut self, id: Id, lifetime: u32, data: Vec<u8>) -> Result<(), Error> {
+    pub fn insert(&mut self, topic: Id, publisher: Id, lifetime: u32, data: Vec<u8>) -> Result<(), Error> {
         // TODO: check distance?
-        Self::check_entry(&self.config, &id, lifetime, &data)?;
+        Self::check_entry(&self.config, topic, publisher, lifetime, &data)?;
 
-        if self.data.len() >= self.config.max_entries {
+        self.remove(topic, publisher);
+
+        if self.entry_count >= self.config.max_entries {
             info!("Error inserting new value, too many entries");
             return Err(Error::TooManyEntries);
         }
-        info!("Inserting {id:?} for {lifetime}s");
+        info!("Inserting {topic:?}:{publisher:?} for {lifetime}s");
 
         let deadline = Instant::now().checked_add(Duration::from_secs(lifetime as u64));
         let deadline = match deadline {
@@ -91,9 +95,32 @@ impl Storage {
             None => return Err(Error::InvalidLifetime),
         };
 
-        self.data.insert(id, data);
-        self.deadlines.push((deadline, id));
+        let entry = TopicEntry {
+            publisher,
+            data,
+        };
+        self.topics.entry(topic).or_default().push(entry);
+        self.deadlines.push((topic, publisher), deadline);
+        self.entry_count += 1;
 
         Ok(())
+    }
+
+    pub fn remove(&mut self, topic: Id, user: Id) {
+        if let Entry::Occupied(mut o) = self.topics.entry(topic) {
+            // Search for position of publisher
+            let pos = o.get_mut().iter().position(|x| x.publisher == user);
+            // if the element is found
+            if let Some(pos) = pos {
+                // remove the element
+                o.get_mut().remove(pos);
+                self.entry_count -= 1;
+                self.deadlines.remove(&(topic, user));
+                // if the topic is empty, remove it from the map
+                if o.get().is_empty() {
+                    o.remove_entry();
+                }
+            }
+        }
     }
 }

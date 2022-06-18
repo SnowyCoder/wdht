@@ -428,7 +428,7 @@ mod tests {
     };
     use test_log;
 
-    use crate::search::BasicSearchOptions;
+    use crate::{search::BasicSearchOptions, transport::TopicEntry};
 
     use super::*;
 
@@ -531,9 +531,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(d, config.routing.bucket_size); // There should be no insertion errors
-        let found = dhts[9].query_value(target, search_options.clone()).await;
+        let found = dhts[9].query_value(target, 1, search_options.clone()).await;
         // TODO: assert_matches... when it gets stabilized
-        assert_eq!(&found.unwrap(), &data);
+        assert_eq!(&found.unwrap()[0].data, &data);
 
         // Uncomment to write dot graph file (for visualization)
         /*File::create("sim10.dot").unwrap().write_all(
@@ -549,7 +549,7 @@ mod tests {
     /// Very expensive test that simulates 100k nodes
     /// takes around 3GiB and (in my crappy laptop) ~5 minutes.
     /// It'd be better to use somewhat parallel bootstrapping.
-    #[test_log::test(tokio::test)]
+    #[test_log::test(tokio::test(flavor = "multi_thread"))]
     #[ignore] // Intensive test
     async fn simulate_100k() {
         let mut rng = StdRng::seed_from_u64(0x123456789abcdef0);
@@ -635,10 +635,13 @@ mod tests {
             assert_eq!(received, config.routing.bucket_size);
             debug!("Retrieving {:?} from {:?}", target, receiver.id());
             let found = receiver
-                .query_value(target, search_options.clone())
+                .query_value(target, 10, search_options.clone())
                 .await
                 .unwrap();
-            assert_eq!(found, data);
+            assert_eq!(found, vec![TopicEntry {
+                data,
+                publisher: pusher.id(),
+            }]);
         }
         info!("Shutting system down");
 

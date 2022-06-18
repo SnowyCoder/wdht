@@ -5,7 +5,7 @@ use futures::stream::FuturesUnordered;
 use tracing::{debug, instrument, warn};
 
 use crate::{
-    transport::{Contact, RawResponse, Request, TransportError, TransportSender},
+    transport::{Contact, RawResponse, Request, TransportError, TransportSender, TopicEntry},
     Id, KademliaDht,
 };
 
@@ -43,12 +43,12 @@ enum QueryState {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SearchType {
     Nodes,
-    Data,
+    Data(u32),
 }
 
 pub enum SearchResult<C: Contact> {
     CloserNodes(Vec<C>),
-    DataFound(Vec<u8>),
+    DataFound(Vec<TopicEntry>),
 }
 
 impl<'a, T: TransportSender> BasicSearch<'a, T> {
@@ -84,7 +84,7 @@ impl<'a, T: TransportSender> BasicSearch<'a, T> {
 
         let message = match self.search_type {
             SearchType::Nodes => Request::FindNodes(self.target_id),
-            SearchType::Data => Request::FindData(self.target_id),
+            SearchType::Data(limit) => Request::FindData(self.target_id, limit),
         };
 
         let fut = self.dht.transport().send(used_id, message);
@@ -164,7 +164,7 @@ impl<'a, T: TransportSender> BasicSearch<'a, T> {
                     }
                 }
                 Ok(FoundData(x)) => {
-                    if self.search_type == SearchType::Data {
+                    if let SearchType::Data(_) = self.search_type {
                         // TODO: handle multiple datas?
                         // If multiple data entries are available then we might need every response
                         // (at least, we might need the full response of the closest bucket)

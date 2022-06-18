@@ -86,16 +86,25 @@ pub trait TransportListener {
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum Request {
     FindNodes(Id),
-    FindData(Id),
+    // Id, max_entries
+    FindData(Id, u32),
     // id, seconds, data
     Insert(Id, u32, Vec<u8>),
+    Remove(Id),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct TopicEntry {
+    pub publisher: Id,
+    pub data: Vec<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum RawResponse<T> {
     FoundNodes(Vec<T>),
-    FoundData(Vec<u8>),
+    FoundData(Vec<TopicEntry>),
     Done,  // Generic response (ex: response to Insert)
     Error, // Generic bad response (should never be thrown with a correct client)
 }

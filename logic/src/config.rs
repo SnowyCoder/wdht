@@ -1,12 +1,16 @@
 use std::num::NonZeroU64;
 
-#[derive(Clone, PartialEq, Eq, Debug, Default)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, PartialEq, Eq, Debug, Default, Deserialize, Serialize)]
+#[serde(default)]
 pub struct SystemConfig {
     pub routing: RoutingConfig,
     pub storage: StorageConfig,
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[serde(default)]
 pub struct RoutingConfig {
     // Also called k in the original paper
     pub bucket_size: usize,
@@ -38,7 +42,8 @@ impl Default for RoutingConfig {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[serde(default)]
 pub struct StorageConfig {
     // Maximum stored data size (in bytes)
     pub max_size: usize,
