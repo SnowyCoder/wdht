@@ -5,6 +5,8 @@ pub use error::{Result, WrtcError};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 
+pub use base::RawConnection;
+
 // Re-export things to make them prettier and consistent with base changes.
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -29,6 +31,11 @@ pub struct WrtcDataChannel(base::WrtcDataChannel);
 impl WrtcDataChannel {
     pub fn send(&mut self, msg: &[u8]) -> Result<()> {
         self.0.send(msg)
+    }
+
+    // Use with caution! Not supported in native (for now)
+    pub fn raw_connection(&self) -> RawConnection {
+        self.0.raw_connection()
     }
 }
 

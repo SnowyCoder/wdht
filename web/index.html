@@ -12,19 +12,31 @@
         await init();
         let encoder = new TextEncoder("utf-8");
         let decoder = new TextDecoder("utf-8");
-        let query_hash = "f5a7d2ab3bea66eaf40f0ca21c07c69d85015e04";
 
         let data = encoder.encode("this seems like it's working!");
 
         let dht = await new WebDht(["http://localhost:3141"]);
         console.log(dht);
-        let insertion_count = await dht.insert(query_hash, 10.0, data);
+        let insertion_count = await dht.insert('my_value', 10.0, data);
 
         console.log("Inserted: ", insertion_count);
 
-        let retrieved = await dht.query(query_hash, 10);
+        let retrieved = await dht.query('my_value', 10);
         console.log("Retrieved: ", decoder.decode(retrieved[0].data));
-        window.dht = dht;
+
+
+        // Simple (stupid) chat
+        let room = 'main'
+        let room_key = 'rossilorenzo.stupid_chat.' + room;
+        let chatters = await dht.query(room_key, 100);
+        dht.insert(room_key, 10.0);// insert with no value
+
+        for (let chatter of chatters) {
+          // TODO: connect
+          console.log('publisher: ', chatter['publisher']);
+        }
+
+
       }
       main()
     </script>

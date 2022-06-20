@@ -9,7 +9,7 @@ use wdht_logic::{
     transport::{TransportError, TransportListener},
     Id,
 };
-use wdht_wrtc::{WrtcChannel, WrtcDataChannel, WrtcError};
+use wdht_wrtc::{WrtcChannel, WrtcDataChannel, WrtcError, RawConnection};
 
 use super::{
     protocol::{
@@ -284,6 +284,10 @@ impl WrtcConnection {
 
     pub fn set_dont_cleanup(self: &Orc<Self>, dont_cleanup: bool) {
         self.inner.lock().unwrap().dont_cleanup = dont_cleanup;
+    }
+
+    pub fn raw_connection(&self) -> RawConnection {
+        self.inner.lock().unwrap().channel.raw_connection()
     }
 }
 

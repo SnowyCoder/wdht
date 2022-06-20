@@ -1,7 +1,6 @@
 use std::{cell::RefCell, rc::Rc};
 
 use js_sys::{Reflect, Uint8Array};
-use send_wrapper::SendWrapper;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, instrument};
 use wasm_bindgen::{prelude::Closure, JsCast, JsValue};
@@ -19,6 +18,7 @@ use crate::{
 use super::common::ChannelHandler;
 
 pub type SessionDescription = serde_json::Value;
+pub type RawConnection = RtcPeerConnection;
 
 impl From<JsValue> for WrtcError {
     fn from(val: JsValue) -> Self {
@@ -38,24 +38,25 @@ impl RtcConfig {
         }
     }
 }
-
-pub struct WrtcDataChannel(SendWrapper<InnerWrtcDataChannel>);
-
-struct InnerWrtcDataChannel {
-    _connection: ConnectionHandler,
+pub struct WrtcDataChannel {
+    connection: ConnectionHandler,
     channel: DataChannelHandler,
 }
 
 impl WrtcDataChannel {
     fn new(connection: ConnectionHandler, channel: DataChannelHandler) -> Self {
-        WrtcDataChannel(SendWrapper::new(InnerWrtcDataChannel {
-            _connection: connection,
+        WrtcDataChannel{
+            connection,
             channel,
-        }))
+        }
     }
 
     pub fn send(&mut self, msg: &[u8]) -> Result<(), WrtcError> {
-        Ok(self.0.channel.channel.send_with_u8_array(msg)?)
+        Ok(self.channel.channel.send_with_u8_array(msg)?)
+    }
+
+    pub fn raw_connection(&self) -> RawConnection {
+        self.connection.connection.clone()
     }
 }
 
@@ -218,7 +219,7 @@ fn create_connection(
         "urls": config.ice_servers
     }]);
     pc_config.ice_servers(&JsValue::from_serde(&val).unwrap());
-    let pc = Rc::new(RtcPeerConnection::new_with_configuration(&pc_config)?);
+    let pc = RtcPeerConnection::new_with_configuration(&pc_config)?;
 
     let (ready_tx, ready_rx) = oneshot::channel();
     let ready_tx = RefCell::new(Some(ready_tx));
@@ -273,7 +274,7 @@ fn create_connection(
 }
 
 struct ConnectionHandler {
-    connection: Rc<RtcPeerConnection>,
+    connection: RtcPeerConnection,
     _oniceconnectionstatechange: Closure<dyn Fn()>,
     _onicecandidate: Closure<dyn Fn(RtcPeerConnectionIceEvent)>,
 }

@@ -64,21 +64,22 @@ impl<T: TransportSender> KademliaDht<T> {
             .collect()
     }
 
-    pub async fn query_value(&self, key: Id, max_entry_count: u32, options: BasicSearchOptions) -> Option<Vec<TopicEntry>> {
+    pub async fn query_value(&self, key: Id, max_entry_count: u32, options: BasicSearchOptions) -> Vec<TopicEntry> {
         {
             // Check if it's already in storage
             let storage = self.storage.read().unwrap();
             let data = storage.get(key);
+
             if let Some(data) = data {
-                return Some(data.clone());
+                return data.clone();
             }
         }
 
         let bucket = self.get_closer_bucket(key);
         let searcher = BasicSearch::create(self, options, SearchType::Data(max_entry_count), key);
         match searcher.search(bucket).await {
-            SearchResult::CloserNodes(_) => None,
-            SearchResult::DataFound(x) => Some(x),
+            SearchResult::CloserNodes(_) => Vec::new(),
+            SearchResult::DataFound(x) => x,
         }
     }
 

@@ -2,9 +2,10 @@ use std::{rc::Rc, time::Duration};
 
 use js_sys::{Uint8Array, Promise, Array, Object, Reflect};
 use rand::{thread_rng, Rng};
+use sha3::{Shake128, digest::{Update, ExtendableOutput, XofReader}};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::future_to_promise;
-use wdht_logic::{config::SystemConfig, KademliaDht, Id, search::BasicSearchOptions, transport::TopicEntry};
+use wdht_logic::{config::SystemConfig, KademliaDht, Id, search::BasicSearchOptions, transport::{TopicEntry, Contact}};
 use wdht_transport::{create_dht, wrtc::WrtcSender, ShutdownSender};
 
 // When the `wee_alloc` feature is enabled, use `wee_alloc` as the global
@@ -33,6 +34,7 @@ pub struct WebDht {
     _shutdown: ShutdownSender,
 }
 
+
 #[wasm_bindgen]
 impl WebDht {
     #[wasm_bindgen(constructor)]
@@ -53,15 +55,48 @@ impl WebDht {
         }
     }
 
-    pub fn insert(&self, key: String, lifetime: f64, value: Uint8Array) -> Promise {
+    // Insertion
+
+    async fn insert0(kad: Rc<KademliaDht<WrtcSender>>, key: Id, lifetime: f64, value: Option<Uint8Array>) -> Result<JsValue, JsValue> {
+        let lifetime = Duration::from_secs_f64(lifetime);
+
+        Ok(kad.insert(key, lifetime, value.map_or(Vec::new(), |x| x.to_vec())).await
+            .map(|x| (x as u32).into())
+            .map_err(|x| x.to_string())?)
+    }
+
+    pub fn insert_raw(&self, key_id: String, lifetime: f64, value: Option<Uint8Array>) -> Promise {
+        let kad = self.kad.clone();
+        let fut = async move {
+            let key: Id = key_id.parse().map_err(|_| "Failed to convert id")?;
+
+            Self::insert0(kad, key, lifetime, value).await
+        };
+        future_to_promise(fut)
+    }
+
+    pub fn insert(&self, key: String, lifetime: f64, value: Option<Uint8Array>) -> Promise {
+        let kad = self.kad.clone();
+        let fut = async move {
+            let key = hash_key(key)?;
+
+            Self::insert0(kad, key, lifetime, value).await
+        };
+        future_to_promise(fut)
+    }
+
+    // Removal
+
+    async fn remove0(kad: Rc<KademliaDht<WrtcSender>>, key: Id) -> Result<JsValue, JsValue> {
+        let count = kad.remove(key).await;
+        Ok((count as u32).into())
+    }
+
+    pub fn remove_raw(&self, key: String) -> Promise {
         let kad = self.kad.clone();
         let fut = async move {
             let key: Id = key.parse().map_err(|_| "Failed to convert id")?;
-            let lifetime = Duration::from_secs_f64(lifetime);
-
-            Ok(kad.insert(key, lifetime, value.to_vec()).await
-                .map(|x| (x as u32).into())
-                .map_err(|x| x.to_string())?)
+            Self::remove0(kad, key).await
         };
         future_to_promise(fut)
     }
@@ -69,9 +104,28 @@ impl WebDht {
     pub fn remove(&self, key: String) -> Promise {
         let kad = self.kad.clone();
         let fut = async move {
+            let key = hash_key(key)?;
+            Self::remove0(kad, key).await
+        };
+        future_to_promise(fut)
+    }
+
+    // Querying
+
+    async fn query0(kad: Rc<KademliaDht<WrtcSender>>, key: Id, limit: u32) -> Result<JsValue, JsValue> {
+        let search_options = BasicSearchOptions {
+            parallelism: 4,
+        };
+
+        Ok(convert_entry_list(kad.query_value(key, limit, search_options).await).into())
+    }
+
+    pub fn query_raw(&self, key: String, limit: u32) -> Promise {
+        let kad = self.kad.clone();
+        let fut = async move {
             let key: Id = key.parse().map_err(|_| "Failed to convert id")?;
-            let count = kad.remove(key).await;
-            Ok((count as u32).into())
+
+            Self::query0(kad, key, limit).await
         };
         future_to_promise(fut)
     }
@@ -79,18 +133,43 @@ impl WebDht {
     pub fn query(&self, key: String, limit: u32) -> Promise {
         let kad = self.kad.clone();
         let fut = async move {
+            let key = hash_key(key)?;
+
+            Self::query0(kad, key, limit).await
+        };
+        future_to_promise(fut)
+    }
+
+    pub fn connect_to(&self, key: String) -> Promise {
+        let kad = self.kad.clone();
+        let fut = async move {
             let key: Id = key.parse().map_err(|_| "Failed to convert id")?;
 
             let search_options = BasicSearchOptions {
                 parallelism: 4,
             };
-
-            Ok(kad.query_value(key, limit, search_options).await
-                .map(convert_entry_list)
-                .into())
+            let res = kad.query_nodes(key, search_options).await;
+            if res[0].id() != key {
+                Err("Cannot find node")?;
+            }
+            let conn = res[0].raw_connection();
+            Ok(conn.ok_or("Cannot open connection to self")?.into())
         };
         future_to_promise(fut)
     }
+}
+
+fn hash_key(key: String) -> Result<Id, &'static str> {
+    if key.is_empty() {
+        return Err("Key is empty");
+    }
+    let mut hasher = Shake128::default();
+    hasher.update(b"kad_query");
+    hasher.update(key.as_bytes());
+    let mut reader = hasher.finalize_xof();
+    let mut id = Id::ZERO;
+    reader.read(&mut id.0);
+    Ok(id)
 }
 
 fn convert_entry_list(entries: Vec<TopicEntry>) -> Array {

@@ -17,6 +17,7 @@ use crate::{
 use datachannel::SessionDescription as RawSessionDescription;
 
 pub type SessionDescription = Box<RawSessionDescription>;
+pub type RawConnection = ();// Not available on native!
 
 type Connection = Arc<Mutex<Box<RtcPeerConnection<ConnectionHandler>>>>;
 pub struct WrtcDataChannel {
@@ -30,6 +31,10 @@ impl WrtcDataChannel {
         self.data_channel
             .send(msg)
             .map_err(|_| WrtcError::DataChannelError("runtime error".into()))
+    }
+
+    pub fn raw_connection(&self) -> RawConnection {
+        ()
     }
 }
 

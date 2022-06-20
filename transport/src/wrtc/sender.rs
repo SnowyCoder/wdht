@@ -5,6 +5,7 @@ use wdht_logic::{
     transport::{Contact, RawResponse, Request, TransportError, TransportSender},
     Id,
 };
+use wdht_wrtc::RawConnection;
 
 use super::{
     conn::WrtcConnection,
@@ -131,6 +132,15 @@ impl TransportSender for WrtcSender {
 pub enum WrtcContact {
     SelfId(Id),
     Other(Orc<WrtcConnection>),
+}
+
+impl WrtcContact {
+    pub fn raw_connection(&self) -> Option<RawConnection> {
+        match self {
+            WrtcContact::Other(x) => Some(x.raw_connection()),
+            _ => None,
+        }
+    }
 }
 
 impl Drop for WrtcContact {
