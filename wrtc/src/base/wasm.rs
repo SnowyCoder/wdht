@@ -5,20 +5,22 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, instrument};
 use wasm_bindgen::{prelude::Closure, JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
+use wdht_wasync::SenderExt;
 use web_sys::{
     MessageEvent, RtcConfiguration, RtcDataChannel, RtcDataChannelInit, RtcDataChannelType,
-    RtcIceConnectionState, RtcPeerConnection, RtcPeerConnectionIceEvent
+    RtcIceConnectionState, RtcPeerConnection, RtcPeerConnectionIceEvent, RtcDataChannelEvent
 };
 
 use crate::{
     ConnectionRole, SessionDescription as WrappedSessionDescription, WrtcChannel,
-    WrtcDataChannel as WrappedWrtcDataChannel, WrtcError,
+    WrtcDataChannel as WrappedWrtcDataChannel, WrtcError, WrtcEvent,
 };
 
 use super::common::ChannelHandler;
 
 pub type SessionDescription = serde_json::Value;
 pub type RawConnection = RtcPeerConnection;
+pub type RawChannel = RtcDataChannel;
 
 impl From<JsValue> for WrtcError {
     fn from(val: JsValue) -> Self {
@@ -69,8 +71,9 @@ pub async fn create_channel<E>(
 where
     E: From<WrtcError>,
 {
-    let (connection, con_ready_rx) = create_connection(config, answer)?;
-    let (channel, chan_ready_rx, chan_inbound_rx) = create_data_channel(&connection.connection);
+    let (inbound_tx, inbound_rx) = mpsc::channel(16);
+    let (connection, con_ready_rx) = create_connection(config, inbound_tx.clone(), answer)?;
+    let (channel, chan_ready_rx) = create_data_channel(&connection.connection, inbound_tx);
 
     let conn = &connection.connection;
     match role {
@@ -124,24 +127,24 @@ where
     // Return the newly created channel (along with the PeerConnection so it does not close)
     Ok(WrtcChannel {
         sender: WrappedWrtcDataChannel(WrtcDataChannel::new(connection, channel)),
-        listener: chan_inbound_rx,
+        listener: inbound_rx,
     })
 }
 
 #[allow(clippy::type_complexity)]
 fn create_data_channel(
     pc: &RtcPeerConnection,
+    inbound_tx: mpsc::Sender<Result<WrtcEvent, WrtcError>>,
 ) -> (
     DataChannelHandler,
     oneshot::Receiver<Result<(), WrtcError>>,
-    mpsc::Receiver<Result<Vec<u8>, WrtcError>>,
 ) {
     let mut dc_config = RtcDataChannelInit::new();
     dc_config.id(0).protocol("wrtc_json").negotiated(true);
     let dc = pc.create_data_channel_with_data_channel_dict("wdht", &dc_config);
     dc.set_binary_type(RtcDataChannelType::Arraybuffer);
 
-    let (ready_rx, inbound_rx, handler) = ChannelHandler::new();
+    let (ready_rx, handler) = ChannelHandler::new(inbound_tx);
     let handler0 = Rc::new(RefCell::new(handler));
 
     fn on_message(handler: &Rc<RefCell<ChannelHandler>>, ev: MessageEvent) {
@@ -189,7 +192,7 @@ fn create_data_channel(
         _onopen: onopen,
         _onclose: onclose,
     };
-    (handler, ready_rx, inbound_rx)
+    (handler, ready_rx)
 }
 
 struct DataChannelHandler {
@@ -212,6 +215,7 @@ impl Drop for DataChannelHandler {
 
 fn create_connection(
     config: &RtcConfig,
+    inbound_tx: mpsc::Sender<Result<WrtcEvent, WrtcError>>,
     signal_tx: oneshot::Sender<WrappedSessionDescription>,
 ) -> Result<(ConnectionHandler, oneshot::Receiver<bool>), WrtcError> {
     let mut pc_config = RtcConfiguration::new();
@@ -265,10 +269,18 @@ fn create_connection(
     }) as Box<dyn Fn(RtcPeerConnectionIceEvent)>);
     pc.set_onicecandidate(Some(onicecandidate.as_ref().unchecked_ref()));
 
+    let ondatachannel = Closure::wrap(Box::new(move |ev: RtcDataChannelEvent| {
+        let chan = ev.channel();
+
+        let _ = inbound_tx.maybe_spawn_send(Ok(WrtcEvent::OpenChannel(chan)));
+    }) as Box<dyn Fn(RtcDataChannelEvent)>);
+    pc.set_ondatachannel(Some(ondatachannel.as_ref().unchecked_ref()));
+
     let handler = ConnectionHandler {
         connection: pc,
         _oniceconnectionstatechange: oniceconnectionstatechange,
         _onicecandidate: onicecandidate,
+        _ondatachannel: ondatachannel,
     };
     Ok((handler, ready_rx))
 }
@@ -277,6 +289,7 @@ struct ConnectionHandler {
     connection: RtcPeerConnection,
     _oniceconnectionstatechange: Closure<dyn Fn()>,
     _onicecandidate: Closure<dyn Fn(RtcPeerConnectionIceEvent)>,
+    _ondatachannel: Closure<dyn Fn(RtcDataChannelEvent)>,
 }
 
 impl Drop for ConnectionHandler {

@@ -91,9 +91,11 @@ async fn start_kademlia(args: &CommonArgs, id: Option<Id>) -> (Arc<KademliaDht<W
     config.routing.max_routing_count = args.max_routing_count;
 
     let span = span!(Level::INFO, "create_dht", %id);
-    create_dht(config, id, args.bootstrap.clone())
+    let t = create_dht(config, id, args.bootstrap.clone())
         .instrument(span)
-        .await
+        .await;
+
+    (t.0, t.1)
 }
 
 async fn start_client(args: &ClientArgs) {

@@ -1,16 +1,16 @@
 use core::future::Future;
-use std::fmt::{Debug, Formatter};
+use std::{fmt::{Debug, Formatter}, sync::atomic::Ordering};
 use tracing::warn;
 use wdht_logic::{
     transport::{Contact, RawResponse, Request, TransportError, TransportSender},
     Id,
 };
+use wdht_wasync::Orc;
 use wdht_wrtc::RawConnection;
 
 use super::{
     conn::WrtcConnection,
     protocol::{WrtcRequest, WrtcResponse},
-    wasync::Orc,
     Connections,
 };
 
@@ -80,6 +80,12 @@ async fn translate_response(
 
 #[derive(Clone)]
 pub struct WrtcSender(pub(crate) Orc<Connections>);
+
+impl WrtcSender {
+    pub fn connection_count(&self) -> u64 {
+        self.0.connection_count.load(Ordering::Relaxed)
+    }
+}
 
 impl TransportSender for WrtcSender {
     fn ping(&self, _id: Id) {

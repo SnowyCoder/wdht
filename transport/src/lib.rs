@@ -4,19 +4,26 @@ use std::{error::Error, fmt::Display, time::Duration};
 use futures::future::join_all;
 use http_api::{ConnectRequest, ConnectResponse};
 use reqwest::IntoUrl;
+use tokio::sync::mpsc;
 use tracing::{info, Instrument};
-use wasync::{Orc, Weak, sleep, spawn};
+use wdht_wasync::{Orc, Weak, sleep, spawn};
 use wdht_logic::{config::SystemConfig, search::BasicSearchOptions, Id, KademliaDht};
+use wdht_wrtc::{RawConnection, RawChannel};
 use wrtc::{Connections, WrtcSender};
 
 mod http_api;
 #[cfg(feature = "warp")]
 pub mod warp_filter;
-pub mod wasync;
 mod shutdown;
 pub mod wrtc;
 
 pub use shutdown::{ShutdownSender, ShutdownReceiver};
+
+pub struct ChannelOpenEvent {
+    pub id: Id,
+    pub connection: RawConnection,
+    pub channel: RawChannel,
+}
 
 async fn bootstrap_connect<T: IntoUrl>(
     url: T,
@@ -46,13 +53,14 @@ pub async fn create_dht<T>(
     config: SystemConfig,
     id: Id,
     bootstrap: T,
-) -> (Orc<KademliaDht<WrtcSender>>, ShutdownSender)
+) -> (Orc<KademliaDht<WrtcSender>>, ShutdownSender, mpsc::Receiver<ChannelOpenEvent>)
 where
     T: IntoIterator,
     <T as IntoIterator>::Item: IntoUrl + Clone + Display,
 {
     let shutdown_sender = ShutdownSender::new();
-    let dht = wrtc::Connections::create(config, id);
+    let (chan_tx, chan_rx) = mpsc::channel(4);
+    let dht = wrtc::Connections::create(config, id, chan_tx);
     // Run periodic cleaner
     let task = run_periodic_clean(Orc::downgrade(&dht), shutdown_sender.subscribe());
     spawn(task.instrument(tracing::info_span!("Periodic cleaner")));
@@ -72,7 +80,7 @@ where
     dht.bootstrap(search_config, &mut rng).await;
     info!("Bootstrap finished correctly");
 
-    (dht, shutdown_sender)
+    (dht, shutdown_sender, chan_rx)
 }
 
 async fn run_periodic_clean(kad: Weak<KademliaDht<WrtcSender>>, mut shutdown: async_broadcast::Receiver<()>) {

@@ -1,10 +1,11 @@
-use std::{rc::Rc, time::Duration};
+use std::{rc::Rc, time::Duration, cell::RefCell};
 
-use js_sys::{Uint8Array, Promise, Array, Object, Reflect};
+use js_sys::{Uint8Array, Array, Object, Reflect, Function};
 use rand::{thread_rng, Rng};
 use sha3::{Shake128, digest::{Update, ExtendableOutput, XofReader}};
-use wasm_bindgen::prelude::*;
-use wasm_bindgen_futures::future_to_promise;
+use tracing::warn;
+use wasm_bindgen::{prelude::*, JsCast};
+use wasm_bindgen_futures::{future_to_promise, spawn_local};
 use wdht_logic::{config::SystemConfig, KademliaDht, Id, search::BasicSearchOptions, transport::{TopicEntry, Contact}};
 use wdht_transport::{create_dht, wrtc::WrtcSender, ShutdownSender};
 
@@ -28,17 +29,66 @@ pub fn on_start() {
     let _ = tracing_wasm::try_set_as_global_default();
 }
 
+#[wasm_bindgen(typescript_custom_section)]
+const TS_TOPIC: &'static str = r#"
+type Topic = string | {
+    type: "topic" | "raw_id",
+    key: string,
+};
+
+type BootstrapData = Array<string>;
+
+type InsertPromise = Promise<number>;
+type RemovePromise = Promise<number>;
+type QueryPromise = Promise<Array<{
+    data: Uint8Array,
+    publisher: string,
+}>>;
+type ConnectToPromise = Promise<RTCPeerConnection>;
+interface ChannelOpenEvent {
+    peer_id: string,
+    channel: RTCDataChannel,
+    connection: RTCPeerConnection,
+}
+type ChannelOpenListener = (event: ChannelOpenEvent) => void;
+"#;
+
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(typescript_type = "Topic")]
+    pub type Topic;
+
+    #[wasm_bindgen(typescript_type = "BootstrapData")]
+    pub type BootstrapData;
+
+    #[wasm_bindgen(typescript_type = "InsertPromise")]
+    pub type InsertPromise;
+
+    #[wasm_bindgen(typescript_type = "RemovePromise")]
+    pub type RemovePromise;
+
+    #[wasm_bindgen(typescript_type = "QueryPromise")]
+    pub type QueryPromise;
+
+    #[wasm_bindgen(typescript_type = "ConnectToPromise")]
+    pub type ConnectToPromise;
+
+    #[wasm_bindgen(typescript_type = "ChannelOpenListener")]
+    pub type ChannelOpenListener;
+}
+
+
 #[wasm_bindgen]
 pub struct WebDht {
     kad: Rc<KademliaDht<WrtcSender>>,
+    channel_open_listener: Rc<RefCell<Option<Function>>>,
     _shutdown: ShutdownSender,
 }
 
 
 #[wasm_bindgen]
 impl WebDht {
-    #[wasm_bindgen(constructor)]
-    pub async fn new(bootstrap: JsValue) -> Self {
+    pub async fn create(bootstrap: BootstrapData) -> Self {
         let id = thread_rng().gen();
 
         let mut config: SystemConfig = Default::default();
@@ -47,100 +97,78 @@ impl WebDht {
 
         let bootstrap: Vec<String> = bootstrap.into_serde().expect("Invalid bootstrap value");
 
-        let (kad, shutdown) = create_dht(config, id, bootstrap).await;
+        let (kad, shutdown, mut chan_open_rx) = create_dht(config, id, bootstrap).await;
+
+        let listener: Rc<RefCell<Option<Function>>> = Rc::new(RefCell::new(None));
+        let chan_listener = listener.clone();
+        spawn_local(async move {
+            while let Some(chan) = chan_open_rx.recv().await {
+                if let Some(x) = chan_listener.borrow_mut().as_ref() {
+                    let event = Object::new();
+                    Reflect::set(&event, &"peer_id".into(), &chan.id.as_short_hex().into()).unwrap();
+                    Reflect::set(&event, &"channel".into(), &chan.channel).unwrap();
+                    Reflect::set(&event, &"connection".into(), &chan.connection).unwrap();
+                    if let Err(x) = x.call1(
+                        &JsValue::UNDEFINED,
+                        &event,
+                    ) {
+                        warn!("open_data_channel handler returned error: {x:?}");
+                    }
+                }
+            }
+        });
 
         WebDht {
             kad,
+            channel_open_listener: listener,
             _shutdown: shutdown,
         }
     }
 
-    // Insertion
-
-    async fn insert0(kad: Rc<KademliaDht<WrtcSender>>, key: Id, lifetime: f64, value: Option<Uint8Array>) -> Result<JsValue, JsValue> {
-        let lifetime = Duration::from_secs_f64(lifetime);
-
-        Ok(kad.insert(key, lifetime, value.map_or(Vec::new(), |x| x.to_vec())).await
-            .map(|x| (x as u32).into())
-            .map_err(|x| x.to_string())?)
+    pub fn connection_count(&self) -> u32 {
+        self.kad.transport().connection_count() as u32
     }
 
-    pub fn insert_raw(&self, key_id: String, lifetime: f64, value: Option<Uint8Array>) -> Promise {
+    pub fn insert(&self, topic: Topic, lifetime: f64, value: Option<Uint8Array>) -> InsertPromise {
         let kad = self.kad.clone();
         let fut = async move {
-            let key: Id = key_id.parse().map_err(|_| "Failed to convert id")?;
+            let key = parse_topic(topic)?;
 
-            Self::insert0(kad, key, lifetime, value).await
+            let lifetime = Duration::from_secs_f64(lifetime);
+
+            Ok(kad.insert(key, lifetime, value.map_or(Vec::new(), |x| x.to_vec())).await
+                .map(|x| (x as u32).into())
+                .map_err(|x| x.to_string())?)
         };
-        future_to_promise(fut)
+        future_to_promise(fut).unchecked_into()
     }
 
-    pub fn insert(&self, key: String, lifetime: f64, value: Option<Uint8Array>) -> Promise {
+    pub fn remove(&self, topic: Topic) -> RemovePromise {
         let kad = self.kad.clone();
         let fut = async move {
-            let key = hash_key(key)?;
+            let key = parse_topic(topic)?;
 
-            Self::insert0(kad, key, lifetime, value).await
+            let count = kad.remove(key).await;
+            Ok((count as u32).into())
         };
-        future_to_promise(fut)
+        future_to_promise(fut).unchecked_into()
     }
 
-    // Removal
-
-    async fn remove0(kad: Rc<KademliaDht<WrtcSender>>, key: Id) -> Result<JsValue, JsValue> {
-        let count = kad.remove(key).await;
-        Ok((count as u32).into())
-    }
-
-    pub fn remove_raw(&self, key: String) -> Promise {
+    pub fn query(&self, topic: Topic, limit: u32) -> QueryPromise {
         let kad = self.kad.clone();
         let fut = async move {
-            let key: Id = key.parse().map_err(|_| "Failed to convert id")?;
-            Self::remove0(kad, key).await
+            let key = parse_topic(topic)?;
+
+            let search_options = BasicSearchOptions {
+                parallelism: 4,
+            };
+
+            Ok(convert_entry_list(kad.query_value(key, limit, search_options).await).into())
         };
-        future_to_promise(fut)
+        future_to_promise(fut).unchecked_into()
     }
 
-    pub fn remove(&self, key: String) -> Promise {
-        let kad = self.kad.clone();
-        let fut = async move {
-            let key = hash_key(key)?;
-            Self::remove0(kad, key).await
-        };
-        future_to_promise(fut)
-    }
-
-    // Querying
-
-    async fn query0(kad: Rc<KademliaDht<WrtcSender>>, key: Id, limit: u32) -> Result<JsValue, JsValue> {
-        let search_options = BasicSearchOptions {
-            parallelism: 4,
-        };
-
-        Ok(convert_entry_list(kad.query_value(key, limit, search_options).await).into())
-    }
-
-    pub fn query_raw(&self, key: String, limit: u32) -> Promise {
-        let kad = self.kad.clone();
-        let fut = async move {
-            let key: Id = key.parse().map_err(|_| "Failed to convert id")?;
-
-            Self::query0(kad, key, limit).await
-        };
-        future_to_promise(fut)
-    }
-
-    pub fn query(&self, key: String, limit: u32) -> Promise {
-        let kad = self.kad.clone();
-        let fut = async move {
-            let key = hash_key(key)?;
-
-            Self::query0(kad, key, limit).await
-        };
-        future_to_promise(fut)
-    }
-
-    pub fn connect_to(&self, key: String) -> Promise {
+    pub fn connect_to(&self, key: String) -> ConnectToPromise {
         let kad = self.kad.clone();
         let fut = async move {
             let key: Id = key.parse().map_err(|_| "Failed to convert id")?;
@@ -155,8 +183,37 @@ impl WebDht {
             let conn = res[0].raw_connection();
             Ok(conn.ok_or("Cannot open connection to self")?.into())
         };
-        future_to_promise(fut)
+        future_to_promise(fut).unchecked_into()
     }
+
+    pub fn on_connection(&self, fun: Option<ChannelOpenListener>) {
+        self.channel_open_listener.replace(fun.map(|x| x.unchecked_into()));
+    }
+}
+
+fn parse_topic(topic: Topic) -> Result<Id, JsValue> {
+    if let Some(x) = topic.as_string() {
+        return Ok(x.parse().map_err(|_| "Failed to convert id")?)
+    }
+    if !topic.is_object() {
+        return Err("Invalid topic type".into());
+    }
+
+    let get_or_invalid = |name: &str| {
+        Reflect::get(&topic, &name.into())
+            .ok()
+            .and_then(|x| x.as_string())
+            .ok_or_else(|| "Invalid topic type")
+    };
+    let ttype = get_or_invalid("type")?;
+    let key = get_or_invalid("type")?;
+
+    let res = match ttype.as_str() {
+        "topic" => hash_key(key),
+        "raw_key" => key.parse().map_err(|_| "Failed to parse raw id"),
+        _ => Err("Unrecognized topic type"),
+    }?;
+    Ok(res)
 }
 
 fn hash_key(key: String) -> Result<Id, &'static str> {

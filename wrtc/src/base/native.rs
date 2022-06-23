@@ -5,7 +5,7 @@ use datachannel::{
     PeerConnectionHandler, RtcConfig as InnerConfig, RtcDataChannel, RtcPeerConnection, SdpType,
     SignalingState,
 };
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, mpsc};
 use tracing::{debug, error, info};
 
 use super::common::ChannelHandler;
@@ -18,6 +18,7 @@ use datachannel::SessionDescription as RawSessionDescription;
 
 pub type SessionDescription = Box<RawSessionDescription>;
 pub type RawConnection = ();// Not available on native!
+pub type RawChannel = ();// Not available on native!
 
 type Connection = Arc<Mutex<Box<RtcPeerConnection<ConnectionHandler>>>>;
 pub struct WrtcDataChannel {
@@ -57,9 +58,10 @@ pub async fn create_channel<E>(
 where
     E: From<WrtcError>,
 {
+    let (inbound_tx, inbound_rx) = mpsc::channel(16);
     let (conn, state_rx) = create_connection(config, answer);
 
-    let (ready, rx_inbound, chan) = ChannelHandler::new();
+    let (ready, chan) = ChannelHandler::new(inbound_tx);
     let dc_init = DataChannelInit::default()
         .negotiated()
         .manual_stream()
@@ -104,7 +106,7 @@ where
             _peer_connection: conn,
             data_channel: dc,
         }),
-        listener: rx_inbound,
+        listener: inbound_rx,
     })
 }
 
@@ -165,7 +167,8 @@ impl PeerConnectionHandler for ConnectionHandler {
     type DCH = ChannelHandler;
 
     fn data_channel_handler(&mut self) -> Self::DCH {
-        let (_, _, chan) = ChannelHandler::new();
+        let (tx, _rx) = mpsc::channel(0);
+        let (_, chan) = ChannelHandler::new(tx);
         chan
     }
 
@@ -214,6 +217,7 @@ impl PeerConnectionHandler for ConnectionHandler {
 
     fn on_data_channel(&mut self, _data_channel: Box<RtcDataChannel<Self::DCH>>) {
         info!("Peer tried to open data channel");
+        // Data channel not supported on native connections (yet)
     }
 
     fn on_signaling_state_change(&mut self, _state: SignalingState) {}

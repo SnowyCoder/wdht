@@ -9,13 +9,13 @@ use wdht_logic::{
     transport::{TransportError, TransportListener},
     Id,
 };
-use wdht_wrtc::{WrtcChannel, WrtcDataChannel, WrtcError, RawConnection};
+use wdht_wrtc::{WrtcChannel, WrtcDataChannel, WrtcError, RawConnection, WrtcEvent, RawChannel};
+use wdht_wasync::{sleep, spawn, Orc, Weak};
 
 use super::{
     protocol::{
         HandshakeRequest, HandshakeResponse, WrtcMessage, WrtcPayload, WrtcRequest, WrtcResponse,
     },
-    wasync::{sleep, spawn, Orc, Weak},
     Connections, WrtcTransportError,
 };
 
@@ -63,7 +63,9 @@ pub async fn handshake_passive(conn: &mut WrtcChannel, id: Id) -> Result<Id, Pee
         .listener
         .recv()
         .await
-        .ok_or(WrtcError::ConnectionLost)??;
+        .ok_or(WrtcError::ConnectionLost)??
+        .data()
+        .ok_or(PeerMessageError::HandshakeError("opened channel".into()))?;
     let req = serde_json::from_slice::<HandshakeRequest>(&msg)?;
 
     let peer_id = req.my_id;
@@ -88,7 +90,10 @@ pub async fn handshake_active(conn: &mut WrtcChannel, id: Id) -> Result<Id, Peer
         .listener
         .recv()
         .await
-        .ok_or(WrtcError::ConnectionLost)??;
+        .ok_or(WrtcError::ConnectionLost)??
+        .data()
+        .ok_or(PeerMessageError::HandshakeError("opened channel".into()))?;
+
     let res = serde_json::from_slice::<HandshakeResponse>(&msg)?;
 
     match res {
@@ -383,13 +388,34 @@ fn process_message(msg: &[u8], conn: Orc<WrtcConnection>) -> Result<(), PeerMess
     Ok(())
 }
 
+async fn process_channel(channel: RawChannel, conn: Orc<WrtcConnection>) -> Result<(), PeerMessageError> {
+    let root = conn
+        .parent
+        .upgrade()
+        .ok_or(PeerMessageError::UnknownInternalError("Shutting down"))?;
+
+    let connection = conn.inner.lock().unwrap().channel.raw_connection().clone();
+    let _ = root.channel_open_tx.send(crate::ChannelOpenEvent {
+        id: conn.peer_id,
+        connection,
+        channel,
+    }).await;
+    Ok(())
+}
+
 async fn connection_listen(
-    mut mex_rx: mpsc::Receiver<Result<Vec<u8>, WrtcError>>,
+    mut mex_rx: mpsc::Receiver<Result<WrtcEvent, WrtcError>>,
     conn: Weak<WrtcConnection>,
 ) {
     while let Some(msg) = mex_rx.recv().await {
         match (msg, conn.upgrade()) {
-            (Ok(x), Some(conn)) => {
+            (Ok(WrtcEvent::OpenChannel(x)), Some(conn)) => {
+                if let Err(x) = process_channel(x, conn).await {
+                    warn!("Error while processing open channel: {}", x);
+                    break;
+                }
+            }
+            (Ok(WrtcEvent::Data(x)), Some(conn)) => {
                 if let Err(x) = process_message(&x, conn) {
                     warn!("Error while processing message: {}", x);
                     break;

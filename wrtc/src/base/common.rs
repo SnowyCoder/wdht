@@ -1,28 +1,28 @@
 use tokio::sync::{
-    mpsc::{self, error::TrySendError},
+    mpsc,
     oneshot,
 };
 use tracing::debug;
+use wdht_wasync::SenderExt;
 
-use crate::{Result, WrtcError};
+use crate::{Result, WrtcError, WrtcEvent};
 
 pub struct ChannelHandler {
     ready_tx: Option<oneshot::Sender<Result<()>>>,
-    inbound_tx: mpsc::Sender<Result<Vec<u8>>>,
+    inbound_tx: mpsc::Sender<Result<WrtcEvent>>,
 }
 
 impl ChannelHandler {
     #![allow(clippy::type_complexity)]
-    pub fn new() -> (
+    pub fn new(
+        inbound_tx: mpsc::Sender<Result<WrtcEvent>>
+    ) -> (
         oneshot::Receiver<Result<()>>,
-        mpsc::Receiver<Result<Vec<u8>>>,
         Self,
     ) {
         let (ready_tx, ready_rx) = oneshot::channel();
-        let (inbound_tx, inbound_rx) = mpsc::channel(16);
         (
             ready_rx,
-            inbound_rx,
             Self {
                 ready_tx: Some(ready_tx),
                 inbound_tx,
@@ -41,11 +41,7 @@ impl ChannelHandler {
 
     pub fn closed(&mut self) {
         debug!("Datachannel closed");
-        if let Err(TrySendError::Full(x)) = self.inbound_tx.try_send(Err(WrtcError::ConnectionLost))
-        {
-            let itx = self.inbound_tx.clone();
-            tokio::spawn(async move { itx.send(x).await });
-        }
+        let _ = self.inbound_tx.maybe_spawn_send(Err(WrtcError::ConnectionLost));
     }
 
     pub fn error(&mut self, err: String) {
@@ -56,10 +52,10 @@ impl ChannelHandler {
             .map(|x| x.send(Err(WrtcError::DataChannelError(err.clone().into()))));
         let _ = self
             .inbound_tx
-            .blocking_send(Err(WrtcError::DataChannelError(err.into())));
+            .maybe_spawn_send(Err(WrtcError::DataChannelError(err.into())));
     }
 
     pub fn message(&mut self, msg: Vec<u8>) {
-        let _ = self.inbound_tx.blocking_send(Ok(msg));
+        let _ = self.inbound_tx.maybe_spawn_send(Ok(WrtcEvent::Data(msg)));
     }
 }

@@ -9,24 +9,25 @@ use std::{
 
 use async_broadcast as broadcast;
 use once_cell::sync::Lazy;
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, mpsc};
 use tracing::{debug, error, event, info, warn, Level};
 use wdht_logic::{
     config::SystemConfig,
     transport::{TransportError, TransportListener},
     Id, KademliaDht,
 };
+use wdht_wasync::{spawn, Orc, Weak, sleep};
 use wdht_wrtc::{
     create_channel, ConnectionRole, RtcConfig, SessionDescription, WrtcChannel, WrtcError,
 };
 
+use crate::ChannelOpenEvent;
+
 use self::{
     conn::{PeerMessageError, WrtcConnection},
     connector::{ContactResult, CreatingConnectionSender, WrtcConnector},
-    wasync::{spawn, Orc, Weak, sleep},
 };
 
-use super::wasync;
 mod conn;
 mod connector;
 mod error;
@@ -46,6 +47,7 @@ pub struct Connections {
     half_closed_connections: Mutex<VecDeque<Id>>,
     half_closed_count: AtomicU64,
     pub connector: Orc<WrtcConnector>,
+    channel_open_tx: mpsc::Sender<ChannelOpenEvent>,
 }
 
 static RTC_CONFIG: Lazy<RtcConfig> = Lazy::new(|| {
@@ -54,7 +56,7 @@ static RTC_CONFIG: Lazy<RtcConfig> = Lazy::new(|| {
 });
 
 impl Connections {
-    pub fn create(config: SystemConfig, id: Id) -> Orc<KademliaDht<WrtcSender>> {
+    pub fn create(config: SystemConfig, id: Id, channel_open_tx: mpsc::Sender<ChannelOpenEvent>) -> Orc<KademliaDht<WrtcSender>> {
         Orc::new_cyclic(|weak_dht| {
             let connections = Orc::new(Connections {
                 dht: weak_dht.clone(),
@@ -65,6 +67,7 @@ impl Connections {
                 half_closed_count: AtomicU64::new(0),
                 half_closed_connections: Mutex::new(VecDeque::new()),
                 connector: Orc::new(WrtcConnector::new(id)),
+                channel_open_tx
             });
             let sender = WrtcSender(connections);
 

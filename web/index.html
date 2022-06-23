@@ -16,6 +16,9 @@
         let data = encoder.encode("this seems like it's working!");
 
         let dht = await new WebDht(["http://localhost:3141"]);
+        dht.on_connection((id, chan, conn) => {
+          console.log("lol", id, chan, conn);
+        });
         console.log(dht);
         let insertion_count = await dht.insert('my_value', 10.0, data);
 
@@ -34,6 +37,12 @@
         for (let chatter of chatters) {
           // TODO: connect
           console.log('publisher: ', chatter['publisher']);
+          try {
+            let conn = await dht.connect_to(chatter['publisher']);
+            console.log(conn);
+          } catch (e) {
+            console.log(e);
+          }
         }
 
 

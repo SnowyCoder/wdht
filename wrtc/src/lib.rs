@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 
 pub use base::RawConnection;
+pub use base::RawChannel;
 
 // Re-export things to make them prettier and consistent with base changes.
 
@@ -20,9 +21,30 @@ pub enum ConnectionRole<E: From<WrtcError>> {
     Passive(SessionDescription),
 }
 
+pub enum WrtcEvent {
+    Data(Vec<u8>),
+    OpenChannel(RawChannel),
+}
+
+impl WrtcEvent {
+    pub fn data(self) -> Option<Vec<u8>> {
+        match self {
+            Self::Data(x) => Some(x),
+            _ => None,
+        }
+    }
+
+    pub fn open_channel(self) -> Option<RawChannel> {
+        match self {
+            Self::OpenChannel(x) => Some(x),
+            _ => None,
+        }
+    }
+}
+
 pub struct WrtcChannel {
     pub sender: WrtcDataChannel,
-    pub listener: mpsc::Receiver<Result<Vec<u8>>>,
+    pub listener: mpsc::Receiver<Result<WrtcEvent>>,
 }
 
 // If this is dropped the connection is also closed
@@ -51,19 +73,10 @@ impl RtcConfig {
 pub async fn create_channel<E>(
     config: &RtcConfig,
     role: ConnectionRole<E>,
-    answer: oneshot::Sender<SessionDescription>,
+    answer: oneshot::Sender<SessionDescription>
 ) -> core::result::Result<WrtcChannel, E>
 where
-    E: From<WrtcError>,
+    E: From<WrtcError>
 {
     base::create_channel(&config.0, role, answer).await
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn it_works() {
-        let result = 2 + 2;
-        assert_eq!(result, 4);
-    }
 }
