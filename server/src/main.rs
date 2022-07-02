@@ -1,11 +1,11 @@
-use std::{net::SocketAddr, num::NonZeroU64, sync::Arc};
+use std::{net::SocketAddr, num::NonZeroU64, sync::Arc, time::Duration};
 
 use rand::{thread_rng, Rng};
 use reqwest::Url;
 use tracing::{info, span, Instrument, Level};
 use tracing_subscriber::{prelude::*, EnvFilter};
 use wdht_logic::{config::SystemConfig, Id, KademliaDht};
-use wdht_transport::{create_dht, warp_filter::dht_connect, wrtc::WrtcSender, ShutdownSender};
+use wdht_transport::{create_dht, warp_filter::dht_connect, wrtc::WrtcSender, ShutdownSender, TransportConfig};
 
 use clap::{Args, Parser, Subcommand};
 use itertools::Itertools;
@@ -31,6 +31,10 @@ struct CommonArgs {
     /// Maximum number of transport connections
     #[clap(long)]
     max_connections: Option<NonZeroU64>,
+
+    /// STUN Servers
+    #[clap(long)]
+    stun_servers: Vec<Url>,
 }
 
 #[derive(Parser, Debug)]
@@ -87,11 +91,13 @@ async fn start_kademlia(args: &CommonArgs, id: Option<Id>) -> (Arc<KademliaDht<W
     let id = id.unwrap_or_else(|| thread_rng().gen());
 
     let mut config: SystemConfig = Default::default();
-    config.routing.max_connections = args.max_connections;
     config.routing.max_routing_count = args.max_routing_count;
+    let mut tconfig: TransportConfig = Default::default();
+    tconfig.max_connections = args.max_connections;
+    tconfig.stun_servers = args.stun_servers.iter().map(|x| x.to_string()).collect();
 
     let span = span!(Level::INFO, "create_dht", %id);
-    let t = create_dht(config, id, args.bootstrap.clone())
+    let t = create_dht(config, tconfig, id, args.bootstrap.clone())
         .instrument(span)
         .await;
 
@@ -108,7 +114,12 @@ async fn start_client(args: &ClientArgs) {
         (0..args.count)
             .into_iter()
             .zip_longest(args.ids.clone())
-            .map(|x| start_kademlia(&args.common, x.right())),
+            .enumerate()
+            .map(|(i, x)| async move {
+                tokio::time::sleep(Duration::from_secs(5 * i as u64)).await;
+                info!("Starting client {i}");
+                start_kademlia(&args.common, x.right()).await
+        }),
     )
     .await;
     info!("Clients started");

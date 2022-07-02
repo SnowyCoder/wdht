@@ -1,6 +1,5 @@
 use std::{
     collections::{HashMap, VecDeque},
-    num::NonZeroU64,
     sync::{
         atomic::{AtomicU64, Ordering},
         Mutex,
@@ -8,7 +7,6 @@ use std::{
 };
 
 use async_broadcast as broadcast;
-use once_cell::sync::Lazy;
 use tokio::sync::{oneshot, mpsc};
 use tracing::{debug, error, event, info, warn, Level};
 use wdht_logic::{
@@ -21,7 +19,7 @@ use wdht_wrtc::{
     create_channel, ConnectionRole, RtcConfig, SessionDescription, WrtcChannel, WrtcError,
 };
 
-use crate::ChannelOpenEvent;
+use crate::{ChannelOpenEvent, TransportConfig};
 
 use self::{
     conn::{PeerMessageError, WrtcConnection},
@@ -40,7 +38,7 @@ pub use sender::{WrtcContact, WrtcSender};
 pub struct Connections {
     pub dht: Weak<KademliaDht<WrtcSender>>,
     pub self_id: Id, // Same ase dht.upggrade().unwrap().id
-    max_connections: Option<NonZeroU64>,
+    pub config: TransportConfig,
     connection_count: AtomicU64,
     // TODO: use some locking hashmap?
     pub connections: Mutex<HashMap<Id, Orc<WrtcConnection>>>,
@@ -50,17 +48,12 @@ pub struct Connections {
     channel_open_tx: mpsc::Sender<ChannelOpenEvent>,
 }
 
-static RTC_CONFIG: Lazy<RtcConfig> = Lazy::new(|| {
-    // TODO: have more STUN servers.
-    RtcConfig::new(&["stun:stun1.l.google.com:19302"])
-});
-
 impl Connections {
-    pub fn create(config: SystemConfig, id: Id, channel_open_tx: mpsc::Sender<ChannelOpenEvent>) -> Orc<KademliaDht<WrtcSender>> {
+    pub fn create(config: SystemConfig, tconfig: TransportConfig, id: Id, channel_open_tx: mpsc::Sender<ChannelOpenEvent>) -> Orc<KademliaDht<WrtcSender>> {
         Orc::new_cyclic(|weak_dht| {
             let connections = Orc::new(Connections {
                 dht: weak_dht.clone(),
-                max_connections: config.routing.max_connections,
+                config: tconfig,
                 self_id: id,
                 connections: Mutex::new(HashMap::new()),
                 connection_count: AtomicU64::new(0),
@@ -115,7 +108,7 @@ impl Connections {
     }
 
     fn alloc_connection(self: &Orc<Self>) -> bool {
-        let limit = match self.max_connections {
+        let limit = match self.config.max_connections {
             Some(x) => x,
             None => {
                 self.connection_count.fetch_add(1, Ordering::SeqCst);
@@ -182,11 +175,18 @@ impl Connections {
         is_active: bool,
         conn_tx: CreatingConnectionSender,
     ) {
+        let config = {
+            let this = match this.upgrade() {
+                Some(x) => x,
+                None => return,
+            };
+            RtcConfig::new(&this.config.stun_servers)
+        };
         let channel = tokio::select! {
             _ = sleep(Duration::from_secs(60)) => {
                 Err(TransportError::ConnectionLost.into())
             },
-            channel = create_channel(&RTC_CONFIG, role, answer_tx) => channel,
+            channel = create_channel(&config, role, answer_tx) => channel,
         };
 
         let this = match this.upgrade() {

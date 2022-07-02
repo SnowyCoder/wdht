@@ -533,7 +533,7 @@ mod tests {
         assert_eq!(d, config.routing.bucket_size); // There should be no insertion errors
         let found = dhts[9].query_value(target, 1, search_options.clone()).await;
         // TODO: assert_matches... when it gets stabilized
-        assert_eq!(&found.unwrap()[0].data, &data);
+        assert_eq!(&found[0].data, &data);
 
         // Uncomment to write dot graph file (for visualization)
         /*File::create("sim10.dot").unwrap().write_all(
@@ -636,8 +636,7 @@ mod tests {
             debug!("Retrieving {:?} from {:?}", target, receiver.id());
             let found = receiver
                 .query_value(target, 10, search_options.clone())
-                .await
-                .unwrap();
+                .await;
             assert_eq!(found, vec![TopicEntry {
                 data,
                 publisher: pusher.id(),

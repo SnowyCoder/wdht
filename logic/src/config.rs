@@ -23,9 +23,6 @@ pub struct RoutingConfig {
     // (but decreases routing hops)
     pub buckets_per_bit: usize,
 
-    // Max number of connected nodes
-    pub max_connections: Option<NonZeroU64>,
-
     // Max number of nodes in routing table
     pub max_routing_count: Option<NonZeroU64>,
 }
@@ -36,7 +33,6 @@ impl Default for RoutingConfig {
             bucket_size: 4,
             bucket_replacement_size: 2,
             buckets_per_bit: 1,
-            max_connections: None,
             max_routing_count: None,
         }
     }

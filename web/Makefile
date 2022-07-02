@@ -10,16 +10,15 @@ build-bundler-dev: src
 build-web-dev: src
 	wasm-pack build --target web --dev
 
-clean-js-json:
-	sed -i -e 's/"name": "web-dht-wasm"/"name": "web-dht"/g' pkg/package.json
+rename-target:
+	sed -i -e 's/web\([-_]\)dht[-_]wasm/web\1dht/g' pkg/package.json pkg/web_dht_wasm.js
+	for f in pkg/web_dht_wasm*; do mv "$$f" $$(echo "$$f" | sed 's/web_dht_wasm/web_dht/g'); done
 
-pkg-web: build-web-dev clean-js-json
-pkg-bundler: build-bundler-dev clean-js-json
+pkg-web: build-web-dev rename-target
+pkg-bundler: build-bundler-dev rename-target
 
 build-bundler: pkg-bundler
 build-web: pkg-web
 
 serve: pkg-web
 	python3 -m http.server
-
-

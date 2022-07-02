@@ -7,7 +7,7 @@ use tracing::warn;
 use wasm_bindgen::{prelude::*, JsCast};
 use wasm_bindgen_futures::{future_to_promise, spawn_local};
 use wdht_logic::{config::SystemConfig, KademliaDht, Id, search::BasicSearchOptions, transport::{TopicEntry, Contact}};
-use wdht_transport::{create_dht, wrtc::WrtcSender, ShutdownSender};
+use wdht_transport::{create_dht, wrtc::WrtcSender, ShutdownSender, TransportConfig};
 
 // When the `wee_alloc` feature is enabled, use `wee_alloc` as the global
 // allocator.
@@ -92,12 +92,13 @@ impl WebDht {
         let id = thread_rng().gen();
 
         let mut config: SystemConfig = Default::default();
-        config.routing.max_connections = Some(128.try_into().unwrap());
         config.routing.max_routing_count = Some(64.try_into().unwrap());
+        let mut tconfig: TransportConfig = Default::default();
+        tconfig.max_connections = Some(128.try_into().unwrap());
 
         let bootstrap: Vec<String> = bootstrap.into_serde().expect("Invalid bootstrap value");
 
-        let (kad, shutdown, mut chan_open_rx) = create_dht(config, id, bootstrap).await;
+        let (kad, shutdown, mut chan_open_rx) = create_dht(config, tconfig, id, bootstrap).await;
 
         let listener: Rc<RefCell<Option<Function>>> = Rc::new(RefCell::new(None));
         let chan_listener = listener.clone();
