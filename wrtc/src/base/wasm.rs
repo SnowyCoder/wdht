@@ -16,8 +16,6 @@ use crate::{
     WrtcDataChannel as WrappedWrtcDataChannel, WrtcError, WrtcEvent,
 };
 
-use super::common::ChannelHandler;
-
 pub type SessionDescription = serde_json::Value;
 pub type RawConnection = RtcPeerConnection;
 pub type RawChannel = RtcDataChannel;
@@ -53,7 +51,7 @@ impl WrtcDataChannel {
         }
     }
 
-    pub fn send(&mut self, msg: &[u8]) -> Result<(), WrtcError> {
+    pub async fn send(&mut self, msg: &[u8]) -> Result<(), WrtcError> {
         Ok(self.channel.channel.send_with_u8_array(msg)?)
     }
 
@@ -296,5 +294,58 @@ impl Drop for ConnectionHandler {
     fn drop(&mut self) {
         self.connection.set_oniceconnectionstatechange(None);
         self.connection.set_onicecandidate(None);
+    }
+}
+
+pub struct ChannelHandler {
+    ready_tx: Option<oneshot::Sender<Result<(), WrtcError>>>,
+    inbound_tx: mpsc::Sender<Result<WrtcEvent, WrtcError>>,
+}
+
+impl ChannelHandler {
+    #![allow(clippy::type_complexity)]
+    pub fn new(
+        inbound_tx: mpsc::Sender<Result<WrtcEvent, WrtcError>>
+    ) -> (
+        oneshot::Receiver<Result<(), WrtcError>>,
+        Self,
+    ) {
+        let (ready_tx, ready_rx) = oneshot::channel();
+        (
+            ready_rx,
+            Self {
+                ready_tx: Some(ready_tx),
+                inbound_tx,
+            },
+        )
+    }
+
+    pub fn open(&mut self) {
+        // Signal open
+        let _ = self
+            .ready_tx
+            .take()
+            .expect("Channel already open")
+            .send(Ok(()));
+    }
+
+    pub fn closed(&mut self) {
+        debug!("Datachannel closed");
+        let _ = self.inbound_tx.maybe_spawn_send(Err(WrtcError::ConnectionLost));
+    }
+
+    pub fn error(&mut self, err: String) {
+        debug!("DataChannel on_error {}", err);
+        let _ = self
+            .ready_tx
+            .take()
+            .map(|x| x.send(Err(WrtcError::DataChannelError(err.clone().into()))));
+        let _ = self
+            .inbound_tx
+            .maybe_spawn_send(Err(WrtcError::DataChannelError(err.into())));
+    }
+
+    pub fn message(&mut self, msg: Vec<u8>) {
+        let _ = self.inbound_tx.maybe_spawn_send(Ok(WrtcEvent::Data(msg)));
     }
 }

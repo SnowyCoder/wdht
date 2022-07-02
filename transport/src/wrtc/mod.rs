@@ -68,7 +68,7 @@ impl Connections {
         })
     }
 
-    fn after_handshake(
+    async fn after_handshake(
         self: Orc<Self>,
         channel: WrtcChannel,
         res: Result<Id, PeerMessageError>,
@@ -101,13 +101,13 @@ impl Connections {
         }
         if let Some(x) = self.dht.upgrade() {
             // Inform the connection that it's used in the routing table
-            connection.set_dont_cleanup(x.on_connect(id));
+            connection.set_dont_cleanup(x.on_connect(id)).await;
         }
         let connection = WrtcContact::Other(connection);
         conn_tx.send(Ok(connection));
     }
 
-    fn alloc_connection(self: &Orc<Self>) -> bool {
+    async fn alloc_connection(self: &Orc<Self>) -> bool {
         let limit = match self.config.max_connections {
             Some(x) => x,
             None => {
@@ -164,7 +164,7 @@ impl Connections {
         // Do not update the connection count, and don't even update the half-closed queue
         // (we already took care of that)
         self.on_disconnect(id, false, false);
-        conn.shutdown_local();
+        conn.shutdown_local().await;
         true
     }
 
@@ -201,7 +201,7 @@ impl Connections {
                 } else {
                     conn::handshake_passive(&mut channel, this.self_id).await
                 };
-                this.after_handshake(channel, res, conn_tx);
+                this.after_handshake(channel, res, conn_tx).await;
             }
             Err(x) => {
                 this.connection_count.fetch_sub(1, Ordering::SeqCst);
@@ -221,7 +221,7 @@ impl Connections {
             Some(x) => x,
             None => return Err(WrtcTransportError::AlreadyConnecting),
         };
-        if !self.alloc_connection() {
+        if !self.alloc_connection().await {
             info!("Cannot create passive connection: connection limit reached");
             return Err(WrtcTransportError::ConnectionLimitReached);
         }
@@ -258,7 +258,7 @@ impl Connections {
         ),
         WrtcTransportError,
     > {
-        if !self.alloc_connection() {
+        if !self.alloc_connection().await {
             return Err(WrtcTransportError::ConnectionLimitReached);
         }
 

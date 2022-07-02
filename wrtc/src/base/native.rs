@@ -1,37 +1,44 @@
-use std::sync::{Arc, Mutex, Weak};
-
-use datachannel::{
-    ConnectionState, DataChannelHandler, DataChannelInit, GatheringState, IceCandidate,
-    PeerConnectionHandler, RtcConfig as InnerConfig, RtcDataChannel, RtcPeerConnection, SdpType,
-    SignalingState,
+use bytes::Bytes;
+use tracing::debug;
+use webrtc::api::APIBuilder;
+use webrtc::api::setting_engine::SettingEngine;
+use webrtc::api::{
+    media_engine::MediaEngine,
+    interceptor_registry::register_default_interceptors,
 };
-use tokio::sync::{oneshot, mpsc};
-use tracing::{debug, error, info};
+use webrtc::data::Error;
+use webrtc::data::data_channel::DataChannel;
+use webrtc::data_channel::data_channel_init::RTCDataChannelInit;
+use webrtc::ice_transport::ice_server::RTCIceServer;
+use webrtc::interceptor::registry::Registry;
+use webrtc::peer_connection::RTCPeerConnection;
+use webrtc::peer_connection::configuration::RTCConfiguration;
+use tokio::sync::{mpsc, oneshot};
+use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
+use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
+use std::sync::Arc;
 
-use super::common::ChannelHandler;
-use crate::{
-    error::WrtcError, ConnectionRole, SessionDescription as WrappedSessionDescription, WrtcChannel,
-    WrtcDataChannel as WrappedWrtcDataChannel,
-};
+use crate::{WrtcError, ConnectionRole, SessionDescription as WrappedSessionDescription, WrtcChannel, WrtcEvent, WrtcDataChannel as WrappedWrtcDataChannel};
 
-use datachannel::SessionDescription as RawSessionDescription;
+pub type SessionDescription = RTCSessionDescription;
+pub type RawConnection = ();// Not available on native!???? TODO
+pub type RawChannel = ();// Not available on native!????
 
-pub type SessionDescription = Box<RawSessionDescription>;
-pub type RawConnection = ();// Not available on native!
-pub type RawChannel = ();// Not available on native!
+const MESSAGE_SIZE: usize = 4096;
 
-type Connection = Arc<Mutex<Box<RtcPeerConnection<ConnectionHandler>>>>;
 pub struct WrtcDataChannel {
     // Only kept to keep the original connection from being deallocated
-    _peer_connection: Connection,
-    data_channel: Box<RtcDataChannel<ChannelHandler>>,
+    _peer_connection: Arc<RTCPeerConnection>,
+    data_channel: Arc<DataChannel>,
 }
 
 impl WrtcDataChannel {
-    pub fn send(&mut self, msg: &[u8]) -> Result<(), WrtcError> {
+    pub async fn send(&mut self, msg: &Bytes) -> Result<(), WrtcError> {
         self.data_channel
-            .send(msg)
-            .map_err(|_| WrtcError::DataChannelError("runtime error".into()))
+            .write(msg)
+            .await
+            .map_err(|_| WrtcError::DataChannelError("runtime error".into()))?;
+        Ok(())
     }
 
     pub fn raw_connection(&self) -> RawConnection {
@@ -39,14 +46,24 @@ impl WrtcDataChannel {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct RtcConfig(InnerConfig);
+pub struct RtcConfig(Vec<String>);
 
 impl RtcConfig {
     pub fn new<S: AsRef<str>>(ice_servers: &[S]) -> Self {
-        let mut conf = InnerConfig::new(ice_servers);
-        conf.disable_auto_negotiation = true;
-        RtcConfig(conf)
+        let ice_servers = ice_servers.iter()
+            .map(|x| x.as_ref().to_string())
+            .collect();
+        RtcConfig(ice_servers)
+    }
+
+    pub fn get_config(&self) -> RTCConfiguration {
+        RTCConfiguration {
+            ice_servers: vec![RTCIceServer {
+                urls: self.0.clone(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
     }
 }
 
@@ -58,167 +75,132 @@ pub async fn create_channel<E>(
 where
     E: From<WrtcError>,
 {
+    let mut m = MediaEngine::default();
+    m.register_default_codecs().unwrap();
+    let mut registry = Registry::new();
+    registry = register_default_interceptors(registry, &mut m).unwrap();
+    let mut settings = SettingEngine::default();
+    settings.detach_data_channels();
+
+    let api = APIBuilder::new()
+        .with_media_engine(m)
+        .with_interceptor_registry(registry)
+        .with_setting_engine(settings)
+        .build();
+
+    let config = config.get_config();
+
+    let peer_connection = Arc::new(api.new_peer_connection(config).await.unwrap());
+    let (conn_ready_tx, conn_ready_rx) = oneshot::channel();
+    let mut conn_ready_tx = Some(conn_ready_tx);
+
+    peer_connection
+        .on_peer_connection_state_change(Box::new(move |s: RTCPeerConnectionState| {
+            println!("Peer Connection State has changed: {}", s);
+
+            let state = match s {
+                RTCPeerConnectionState::Connected => Some(true),
+                RTCPeerConnectionState::Failed |
+                RTCPeerConnectionState::Closed => Some(false),
+                _ => None
+            };
+            if let Some(state) = state {
+                if let Some(x) = conn_ready_tx.take() {
+                    let _ = x.send(state);
+                }
+            }
+
+            Box::pin(async {})
+        }))
+        .await;
+    //TODO: peer_connection.on_data_channel(f)
+    let channel = peer_connection.create_data_channel("wdht", Some(RTCDataChannelInit {
+        protocol: Some("wrtc_json".to_owned()),
+        negotiated: Some(true),
+        id: Some(1),
+        ..Default::default()
+    })).await.unwrap();
+
     let (inbound_tx, inbound_rx) = mpsc::channel(16);
-    let (conn, state_rx) = create_connection(config, answer);
+    let (ready_tx, ready_rx) = oneshot::channel();
+    let d = channel.clone();
+    channel.on_open(Box::new(move || Box::pin(async move {
+        let raw = d.detach().await.expect("Error detaching channel");
+        let _ = ready_tx.send(true);
 
-    let (ready, chan) = ChannelHandler::new(inbound_tx);
-    let dc_init = DataChannelInit::default()
-        .negotiated()
-        .manual_stream()
-        .stream(0)
-        .protocol("wrtc_json");
+        tokio::spawn(read_loop(raw, inbound_tx));
+    }))).await;
 
-    let dc = conn
-        .lock()
-        .unwrap()
-        .create_data_channel_ex("wdht", chan, &dc_init)
-        .expect("Invalid args provided");
+    let mut gather_complete = peer_connection.gathering_complete_promise().await;
+    let send_complete_description = move |peer_connection: Arc<RTCPeerConnection>| async move {
+        gather_complete.recv().await;
+        let desc = peer_connection.local_description().await
+            .ok_or_else(|| WrtcError::RuntimeError("No local description after gathering complete".into()))?;
+        let _ = answer.send(WrappedSessionDescription(desc));
+        Ok(())
+    };
 
     match role {
         ConnectionRole::Active(answer_rx) => {
-            conn.lock()
-                .unwrap()
-                .set_local_description(SdpType::Offer)
-                .expect("Error setting local description");
+            let offer = peer_connection.create_offer(None).await
+                .map_err(|_| WrtcError::SignalingFailed)?;
+
+            peer_connection.set_local_description(offer).await
+                .map_err(|_| WrtcError::SignalingFailed)?;
+
+            send_complete_description(peer_connection.clone()).await?;
+
             let answer = answer_rx.await.map_err(|_| WrtcError::SignalingFailed)??;
-            conn.lock().unwrap().set_remote_description(&answer.0)
+            peer_connection.set_remote_description(answer.0).await
+                .map_err(|_| WrtcError::InvalidDescription)?;
         }
         ConnectionRole::Passive(offer) => {
-            let mut conn = conn.lock().unwrap();
-            conn.set_remote_description(&offer.0)
-                .and_then(|_| conn.set_local_description(SdpType::Answer))
+            peer_connection.set_remote_description(offer.0).await
+                .map_err(|_| WrtcError::SignalingFailed)?;
+
+            let answer = peer_connection.create_answer(None).await
+                .map_err(|_| WrtcError::SignalingFailed)?;
+
+            peer_connection.set_local_description(answer).await
+                .map_err(|_| WrtcError::InvalidDescription)?;
+
+            send_complete_description(peer_connection.clone()).await?;
         }
     }
-    .map_err(|_| WrtcError::InvalidDescription)?;
 
-    // Wait for the connection to open
-    if !state_rx.await.map_err(|_| WrtcError::SignalingFailed)? {
+    // Wait for connection to be ready
+    if !conn_ready_rx.await.map_err(|_| WrtcError::SignalingFailed)? {
         return Err(WrtcError::SignalingFailed.into());
     }
     // Wait for the datachannel to be ready
-    ready.await.map_err(|_| WrtcError::SignalingFailed)??;
+    ready_rx.await.map_err(|_| WrtcError::SignalingFailed)?;
 
     debug!("Datachannel open");
 
-    // Return the newly created channel (along with the PeerConnection so it does not close)
     Ok(WrtcChannel {
         sender: WrappedWrtcDataChannel(WrtcDataChannel {
-            _peer_connection: conn,
-            data_channel: dc,
+            _peer_connection: peer_connection,
+            data_channel: channel.detach().await.expect("Data channel"),
         }),
         listener: inbound_rx,
     })
 }
 
-// Private implementation
-
-fn create_connection(
-    config: &RtcConfig,
-    signal_tx: oneshot::Sender<WrappedSessionDescription>,
-) -> (Connection, oneshot::Receiver<bool>) {
-    let (state_tx, state_rx) = oneshot::channel();
-    let conn = Arc::new_cyclic(|parent| {
-        Mutex::new(
-            RtcPeerConnection::new(
-                &config.0,
-                ConnectionHandler {
-                    signal_tx: Some(signal_tx),
-                    ready_tx: Some(state_tx),
-                    parent: parent.clone(),
-                },
-            )
-            .expect("Failed to create RtcPeerConnection"),
-        )
-    });
-    (conn, state_rx)
-}
-
-impl DataChannelHandler for ChannelHandler {
-    fn on_open(&mut self) {
-        // Signal open
-        self.open();
-    }
-
-    fn on_closed(&mut self) {
-        self.closed();
-    }
-
-    fn on_error(&mut self, err: &str) {
-        self.error(err.to_string());
-    }
-
-    fn on_message(&mut self, msg: &[u8]) {
-        self.message(msg.to_vec());
-    }
-
-    // TODO: implement back-pressure
-    fn on_buffered_amount_low(&mut self) {}
-
-    fn on_available(&mut self) {}
-}
-
-struct ConnectionHandler {
-    signal_tx: Option<oneshot::Sender<WrappedSessionDescription>>,
-    ready_tx: Option<oneshot::Sender<bool>>,
-    parent: Weak<Mutex<Box<RtcPeerConnection<ConnectionHandler>>>>,
-}
-
-impl PeerConnectionHandler for ConnectionHandler {
-    type DCH = ChannelHandler;
-
-    fn data_channel_handler(&mut self) -> Self::DCH {
-        let (tx, _rx) = mpsc::channel(0);
-        let (_, chan) = ChannelHandler::new(tx);
-        chan
-    }
-
-    fn on_description(&mut self, _sess_desc: RawSessionDescription) {
-        // We can't use this to send the description back since we need to wait
-        // until ICE candidates are all gathered (this method gets called
-        // instantly since it implements the trickle ICE protocol).
-    }
-
-    fn on_candidate(&mut self, _cand: IceCandidate) {}
-
-    fn on_connection_state_change(&mut self, state: ConnectionState) {
-        debug!("Connection state change: {:?}", state);
-        use ConnectionState::*;
-        let is_successful = match state {
-            New | Connecting => return,
-            Connected => true,
-            Disconnected | Failed | Closed => false,
-        };
-        self.ready_tx.take().map(|x| x.send(is_successful));
-    }
-
-    fn on_gathering_state_change(&mut self, state: GatheringState) {
-        if let GatheringState::Complete = state {
-            let signal_listener = match self.signal_tx.take() {
-                Some(x) => x,
-                None => return, // Double listen (or we simply ignore the result)
-            };
-
-            let par = match self.parent.upgrade() {
-                Some(x) => x,
-                None => return, // Connection closed
-            };
-            let sess_desc = match par.lock().unwrap().local_description() {
-                Some(x) => x,
-                None => {
-                    error!("Gathering complete but no local description provided");
-                    return;
+async fn read_loop(chan: Arc<DataChannel>, inbound_tx: mpsc::Sender<Result<WrtcEvent, WrtcError>>) {
+    let mut buffer = vec![0u8; MESSAGE_SIZE];
+    loop {
+        let n = match chan.read(&mut buffer).await {
+            Ok(n) => n,
+            Err(err) => {
+                if err != Error::ErrStreamClosed {
+                    let _ = inbound_tx.send(Err(WrtcError::DataChannelError(err.to_string().into()))).await;
                 }
-            };
+                let _ = inbound_tx.send(Err(WrtcError::ConnectionLost)).await;
 
-            // Ignore if signal is not needed
-            let _ = signal_listener.send(WrappedSessionDescription(Box::new(sess_desc)));
-        }
+                return;
+            }
+        };
+
+        let _ = inbound_tx.send(Ok(WrtcEvent::Data(buffer[..n].to_vec()))).await;
     }
-
-    fn on_data_channel(&mut self, _data_channel: Box<RtcDataChannel<Self::DCH>>) {
-        info!("Peer tried to open data channel");
-        // Data channel not supported on native connections (yet)
-    }
-
-    fn on_signaling_state_change(&mut self, _state: SignalingState) {}
 }

@@ -5,7 +5,7 @@ use wdht_logic::{
     transport::{Contact, RawResponse, Request, TransportError, TransportSender},
     Id,
 };
-use wdht_wasync::Orc;
+use wdht_wasync::{Orc, spawn};
 use wdht_wrtc::RawConnection;
 
 use super::{
@@ -141,9 +141,9 @@ pub enum WrtcContact {
 }
 
 impl WrtcContact {
-    pub fn raw_connection(&self) -> Option<RawConnection> {
+    pub async fn raw_connection(&self) -> Option<RawConnection> {
         match self {
-            WrtcContact::Other(x) => Some(x.raw_connection()),
+            WrtcContact::Other(x) => Some(x.raw_connection().await),
             _ => None,
         }
     }
@@ -160,8 +160,8 @@ impl Drop for WrtcContact {
         if Orc::strong_count(parent) != 2 {
             return;
         }
-
-        parent.on_contact_lost();
+        let p = parent.clone();
+        spawn(async move { p.on_contact_lost().await });
     }
 }
 

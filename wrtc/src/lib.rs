@@ -1,6 +1,7 @@
 mod base;
 mod error;
 
+use bytes::Bytes;
 pub use error::{Result, WrtcError};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
@@ -51,8 +52,8 @@ pub struct WrtcChannel {
 pub struct WrtcDataChannel(base::WrtcDataChannel);
 
 impl WrtcDataChannel {
-    pub fn send(&mut self, msg: &[u8]) -> Result<()> {
-        self.0.send(msg)
+    pub async fn send(&mut self, msg: &Bytes) -> Result<()> {
+        self.0.send(msg).await
     }
 
     // Use with caution! Not supported in native (for now)
@@ -61,7 +62,6 @@ impl WrtcDataChannel {
     }
 }
 
-#[derive(Clone, Debug)]
 pub struct RtcConfig(base::RtcConfig);
 
 impl RtcConfig {
