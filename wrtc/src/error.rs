@@ -9,8 +9,8 @@ pub enum WrtcError {
     DataChannelError(Cow<'static, str>),
     #[error("Connection lost")]
     ConnectionLost,
-    #[error("Singaling failed")]
-    SignalingFailed,
+    #[error("Singaling failed: {0}")]
+    SignalingFailed(Cow<'static, str>),
     #[error("Invalid session description")]
     InvalidDescription,
     #[error("Unknown runtime error: {0}")]

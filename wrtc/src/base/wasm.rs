@@ -86,7 +86,7 @@ where
                 .await
                 .map_err(WrtcError::from)?;
             debug!("Waiting for answer");
-            let answer = answer_rx.await.map_err(|_| WrtcError::SignalingFailed)??;
+            let answer = answer_rx.await.map_err(|_| WrtcError::SignalingFailed("Failed to receive SDP answer".into()))??;
             debug!("Answer received");
             let js_answer =
                 JsValue::from_serde(&answer).map_err(|_| WrtcError::InvalidDescription)?;
@@ -113,14 +113,14 @@ where
 
     debug!("Waiting for connection...");
     // Wait for the connection to open
-    if !con_ready_rx.await.map_err(|_| WrtcError::SignalingFailed)? {
-        return Err(WrtcError::SignalingFailed.into());
+    if !con_ready_rx.await.unwrap_or(false){
+        return Err(WrtcError::SignalingFailed("Failed to open connection".into()).into());
     }
     debug!("Wait for channel...");
     // Wait for the datachannel to be ready
     chan_ready_rx
         .await
-        .map_err(|_| WrtcError::SignalingFailed)??;
+        .map_err(|_| WrtcError::SignalingFailed("Failed to open channel".into()))??;
 
     debug!("Datachannel open");
 
@@ -219,10 +219,12 @@ fn create_connection(
     signal_tx: oneshot::Sender<WrappedSessionDescription>,
 ) -> Result<(ConnectionHandler, oneshot::Receiver<bool>), WrtcError> {
     let mut pc_config = RtcConfiguration::new();
-    let val = serde_json::json!([{
-        "urls": config.ice_servers
-    }]);
-    pc_config.ice_servers(&JsValue::from_serde(&val).unwrap());
+    if !config.ice_servers.is_empty() {
+        let val = serde_json::json!([{
+            "urls": config.ice_servers
+        }]);
+        pc_config.ice_servers(&JsValue::from_serde(&val).unwrap());
+    }
     let pc = RtcPeerConnection::new_with_configuration(&pc_config)?;
 
     let (ready_tx, ready_rx) = oneshot::channel();

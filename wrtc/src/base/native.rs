@@ -80,7 +80,7 @@ where
                 .unwrap()
                 .set_local_description(SdpType::Offer)
                 .expect("Error setting local description");
-            let answer = answer_rx.await.map_err(|_| WrtcError::SignalingFailed)??;
+            let answer = answer_rx.await.map_err(|_| WrtcError::SignalingFailed("Failed to receive SDP answer".into()))??;
             conn.lock().unwrap().set_remote_description(&answer.0)
         }
         ConnectionRole::Passive(offer) => {
@@ -92,11 +92,11 @@ where
     .map_err(|_| WrtcError::InvalidDescription)?;
 
     // Wait for the connection to open
-    if !state_rx.await.map_err(|_| WrtcError::SignalingFailed)? {
-        return Err(WrtcError::SignalingFailed.into());
+    if !state_rx.await.unwrap_or(false) {
+        return Err(WrtcError::SignalingFailed("Failed to open coninection".into()).into());
     }
     // Wait for the datachannel to be ready
-    ready.await.map_err(|_| WrtcError::SignalingFailed)??;
+    ready.await.map_err(|_| WrtcError::SignalingFailed("Failed to open channel".into()))??;
 
     debug!("Datachannel open");
 

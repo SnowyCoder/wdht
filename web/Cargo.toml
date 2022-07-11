@@ -27,4 +27,3 @@ gloo-timers = { version = "0.2.4", features = ["futures"] }
 js-sys = "0.3.58"
 tracing = { version = "0.1.35", features = ["max_level_info", "release_max_level_warn"] }
 sha3 = "0.10.1"
-

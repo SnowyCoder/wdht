@@ -244,7 +244,7 @@ impl Connections {
         answer_rx.await.map(|x| (x, conn_rx)).map_err(|_| {
             this.upgrade()
                 .map(|x| x.connection_count.fetch_sub(1, Ordering::SeqCst));
-            WrtcError::SignalingFailed.into()
+            WrtcError::SignalingFailed("Failed to receive passive answer".into()).into()
         })
     }
 
@@ -278,9 +278,7 @@ impl Connections {
         ));
 
         let offer = offer_rx.await.map_err(|_| {
-            this.upgrade()
-                .map(|x| x.connection_count.fetch_sub(1, Ordering::SeqCst));
-            WrtcError::SignalingFailed
+            WrtcError::SignalingFailed("Failed to receive offer".into())
         })?;
         Ok((offer, answer_tx))
     }

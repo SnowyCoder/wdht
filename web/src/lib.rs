@@ -95,6 +95,8 @@ impl WebDht {
         config.routing.max_routing_count = Some(64.try_into().unwrap());
         let mut tconfig: TransportConfig = Default::default();
         tconfig.max_connections = Some(128.try_into().unwrap());
+        // TODO: configuration from JS;
+        tconfig.stun_servers = vec!["stun:stun.l.google.com:19302".to_owned()];
 
         let bootstrap: Vec<String> = bootstrap.into_serde().expect("Invalid bootstrap value");
 
@@ -126,8 +128,14 @@ impl WebDht {
         }
     }
 
+    #[wasm_bindgen(getter)]
     pub fn connection_count(&self) -> u32 {
         self.kad.transport().connection_count() as u32
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn id(&self) -> String {
+        self.kad.id().as_short_hex()
     }
 
     pub fn insert(&self, topic: Topic, lifetime: f64, value: Option<Uint8Array>) -> InsertPromise {
@@ -172,13 +180,13 @@ impl WebDht {
     pub fn connect_to(&self, key: String) -> ConnectToPromise {
         let kad = self.kad.clone();
         let fut = async move {
-            let key: Id = key.parse().map_err(|_| "Failed to convert id")?;
+            let key: Id = key.parse().map_err(|e| format!("Failed to convert id: {e}"))?;
 
             let search_options = BasicSearchOptions {
                 parallelism: 4,
             };
             let res = kad.query_nodes(key, search_options).await;
-            if res[0].id() != key {
+            if res.len() == 0 || res[0].id() != key {
                 Err("Cannot find node")?;
             }
             let conn = res[0].raw_connection();
@@ -194,7 +202,7 @@ impl WebDht {
 
 fn parse_topic(topic: Topic) -> Result<Id, JsValue> {
     if let Some(x) = topic.as_string() {
-        return Ok(x.parse().map_err(|_| "Failed to convert id")?)
+        return Ok(hash_key(x)?);
     }
     if !topic.is_object() {
         return Err("Invalid topic type".into());
@@ -207,13 +215,13 @@ fn parse_topic(topic: Topic) -> Result<Id, JsValue> {
             .ok_or_else(|| "Invalid topic type")
     };
     let ttype = get_or_invalid("type")?;
-    let key = get_or_invalid("type")?;
+    let key = get_or_invalid("key")?;
 
     let res = match ttype.as_str() {
-        "topic" => hash_key(key),
-        "raw_key" => key.parse().map_err(|_| "Failed to parse raw id"),
-        _ => Err("Unrecognized topic type"),
-    }?;
+        "topic" => hash_key(key)?,
+        "raw_id" => key.parse::<Id>().map_err(|x| format!("Failed to parse raw id: {}", x.to_string()))?,
+        _ => Err("Unrecognized topic type")?,
+    };
     Ok(res)
 }
 
