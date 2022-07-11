@@ -65,16 +65,6 @@ impl<T: TransportSender> KademliaDht<T> {
     }
 
     pub async fn query_value(&self, key: Id, max_entry_count: u32, options: BasicSearchOptions) -> Vec<TopicEntry> {
-        {
-            // Check if it's already in storage
-            let storage = self.storage.read().unwrap();
-            let data = storage.get(key);
-
-            if let Some(data) = data {
-                return data.clone();
-            }
-        }
-
         let bucket = self.get_closer_bucket(key);
         let searcher = BasicSearch::create(self, options, SearchType::Data(max_entry_count), key);
         match searcher.search(bucket).await {

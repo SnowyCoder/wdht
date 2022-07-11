@@ -1,4 +1,4 @@
-use std::{cmp::Reverse, collections::HashSet, iter};
+use std::{cmp::Reverse, collections::{HashSet, HashMap}, iter};
 
 use futures::prelude::*;
 use futures::stream::FuturesUnordered;
@@ -102,6 +102,16 @@ impl<'a, T: TransportSender> BasicSearch<'a, T> {
         let bucket_size = self.dht.config().routing.bucket_size;
         let parallelism = self.options.parallelism;
 
+        let mut data_entries: HashMap<Id, Vec<u8>> = HashMap::new();
+        if let SearchType::Data(_) = self.search_type {
+            let storage = self.dht.storage.read().unwrap();
+            if let Some(data) = storage.get(self.target_id) {
+                for entry in data {
+                    data_entries.insert(entry.publisher, entry.data.clone());
+                }
+            }
+        }
+
         let mut queried: HashSet<Id> = first_bucket.iter().map(|x| x.id()).collect();
         queried.insert(self.dht.id()); // We already queried ourself
         debug!("First bucket: {:?}", first_bucket);
@@ -165,10 +175,12 @@ impl<'a, T: TransportSender> BasicSearch<'a, T> {
                 }
                 Ok(FoundData(x)) => {
                     if let SearchType::Data(_) = self.search_type {
-                        // TODO: handle multiple datas?
                         // If multiple data entries are available then we might need every response
                         // (at least, we might need the full response of the closest bucket)
-                        return SearchResult::DataFound(x);
+                        for entry in x {
+                            // TODO: conflicts?
+                            data_entries.insert(entry.publisher, entry.data);
+                        }
                     } else {
                         warn!(
                             "Node {:?} returned data even if only nodes are requested",
@@ -187,6 +199,14 @@ impl<'a, T: TransportSender> BasicSearch<'a, T> {
             }
         }
 
+        if !data_entries.is_empty() {
+            if let SearchType::Data(_) = self.search_type {
+                let res = data_entries.into_iter()
+                    .map(|(publisher, data)| TopicEntry { publisher, data })
+                    .collect::<Vec<_>>();
+                return SearchResult::DataFound(res);
+            }
+        }
         let nodes = to_query.into_iter().map(|x| x.1).collect();
         SearchResult::CloserNodes(nodes)
     }

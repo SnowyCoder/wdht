@@ -153,7 +153,7 @@ impl Id {
 
     pub fn as_short_hex(&self) -> String {
         let hex_id = hex::encode(&self.0);
-        hex_id.trim_start_matches('0').to_owned()
+        hex_id.trim_start_matches("00").to_owned()
     }
 
     pub fn from_hex(data: &str) -> Id {
