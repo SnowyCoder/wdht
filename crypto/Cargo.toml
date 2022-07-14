@@ -1,0 +1,36 @@
+[package]
+name = "wdht-crypto"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+thiserror = "1.0.31"
+
+[dev-dependencies]
+hex = "0.4.3"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+p256 = "0.11"
+sha2 = "0.10"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+tokio = { version = "1.19", features = ["rt", "macros"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies.web-sys]
+version = "0.3"
+features = [
+    "Window",
+    "Crypto",
+    "SubtleCrypto",
+    "CryptoKey",
+    "CryptoKeyPair",
+    "EcdsaParams",
+]
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"

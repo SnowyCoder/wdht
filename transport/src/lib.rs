@@ -11,8 +11,10 @@ use wdht_logic::{config::SystemConfig, search::BasicSearchOptions, Id, KademliaD
 use wdht_wrtc::{RawConnection, RawChannel};
 use wrtc::{Connections, WrtcSender};
 
+mod identity;
 mod config;
 mod http_api;
+mod serde;
 #[cfg(feature = "warp")]
 pub mod warp_filter;
 mod shutdown;
@@ -54,7 +56,6 @@ async fn bootstrap_connect<T: IntoUrl>(
 pub async fn create_dht<T>(
     config: SystemConfig,
     transport_config: TransportConfig,
-    id: Id,
     bootstrap: T,
 ) -> (Orc<KademliaDht<WrtcSender>>, ShutdownSender, mpsc::Receiver<ChannelOpenEvent>)
 where
@@ -63,7 +64,7 @@ where
 {
     let shutdown_sender = ShutdownSender::new();
     let (chan_tx, chan_rx) = mpsc::channel(4);
-    let dht = wrtc::Connections::create(config, transport_config, id, chan_tx);
+    let dht = wrtc::Connections::create(config, transport_config, chan_tx).await;
     // Run periodic cleaner
     let task = run_periodic_clean(Orc::downgrade(&dht), shutdown_sender.subscribe());
     spawn(task.instrument(tracing::info_span!("Periodic cleaner")));

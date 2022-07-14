@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex, Weak};
 use datachannel::{
     ConnectionState, DataChannelHandler, DataChannelInit, GatheringState, IceCandidate,
     PeerConnectionHandler, RtcConfig as InnerConfig, RtcDataChannel, RtcPeerConnection, SdpType,
-    SignalingState,
+    SignalingState, sdp::attribute_type::SdpAttribute,
 };
 use tokio::sync::{oneshot, mpsc};
 use tracing::{debug, error, info};
@@ -36,6 +36,32 @@ impl WrtcDataChannel {
 
     pub fn raw_connection(&self) -> RawConnection {
         ()
+    }
+
+    fn desc_to_fingerprint(desc: Option<RawSessionDescription>) -> Result<Vec<u8>, WrtcError> {
+        desc.ok_or(WrtcError::DataChannelError("Datachannel has no description".into()))?
+            .sdp.attribute.into_iter()
+            .find_map(|x| if let SdpAttribute::Fingerprint(x) = x {
+                    Some(x)
+                } else {
+                    None
+                })
+            .ok_or(WrtcError::DataChannelError("Cannot find fingerprint".into()))
+            .map(|x| x.to_string().into_bytes())
+    }
+
+    pub fn local_certificate_fingerprint(&self) -> Result<Vec<u8>, WrtcError> {
+        let desc = self._peer_connection.lock()
+            .unwrap()
+            .local_description();
+        Self::desc_to_fingerprint(desc)
+    }
+
+    pub fn remote_certificate_fingerprint(&self) -> Result<Vec<u8>, WrtcError> {
+        let desc = self._peer_connection.lock()
+            .unwrap()
+            .remote_description();
+        Self::desc_to_fingerprint(desc)
     }
 }
 

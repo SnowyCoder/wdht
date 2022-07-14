@@ -19,7 +19,7 @@ use wdht_wrtc::{
     create_channel, ConnectionRole, RtcConfig, SessionDescription, WrtcChannel, WrtcError,
 };
 
-use crate::{ChannelOpenEvent, TransportConfig};
+use crate::{ChannelOpenEvent, TransportConfig, identity::Identity};
 
 use self::{
     conn::{PeerMessageError, WrtcConnection},
@@ -29,6 +29,7 @@ use self::{
 mod conn;
 mod connector;
 mod error;
+mod handshake;
 mod protocol;
 mod sender;
 
@@ -37,8 +38,9 @@ pub use sender::{WrtcContact, WrtcSender};
 
 pub struct Connections {
     pub dht: Weak<KademliaDht<WrtcSender>>,
-    pub self_id: Id, // Same ase dht.upggrade().unwrap().id
+    pub self_id: Id, // Same ase dht.upgrade().unwrap().id
     pub config: TransportConfig,
+    pub identity: Identity,
     connection_count: AtomicU64,
     // TODO: use some locking hashmap?
     pub connections: Mutex<HashMap<Id, Orc<WrtcConnection>>>,
@@ -49,11 +51,15 @@ pub struct Connections {
 }
 
 impl Connections {
-    pub fn create(config: SystemConfig, tconfig: TransportConfig, id: Id, channel_open_tx: mpsc::Sender<ChannelOpenEvent>) -> Orc<KademliaDht<WrtcSender>> {
+    pub async fn create(config: SystemConfig, tconfig: TransportConfig, channel_open_tx: mpsc::Sender<ChannelOpenEvent>) -> Orc<KademliaDht<WrtcSender>> {
+        let identity = Identity::generate().await;
+        let id = identity.generate_id().await;
+
         Orc::new_cyclic(|weak_dht| {
             let connections = Orc::new(Connections {
                 dht: weak_dht.clone(),
                 config: tconfig,
+                identity,
                 self_id: id,
                 connections: Mutex::new(HashMap::new()),
                 connection_count: AtomicU64::new(0),
@@ -172,7 +178,6 @@ impl Connections {
         this: Weak<Self>,
         role: ConnectionRole<WrtcTransportError>,
         answer_tx: oneshot::Sender<SessionDescription>,
-        is_active: bool,
         conn_tx: CreatingConnectionSender,
     ) {
         let config = {
@@ -196,11 +201,7 @@ impl Connections {
 
         match channel {
             Ok(mut channel) => {
-                let res = if is_active {
-                    conn::handshake_active(&mut channel, this.self_id).await
-                } else {
-                    conn::handshake_passive(&mut channel, this.self_id).await
-                };
+                let res = handshake::handshake(&mut channel, &this.identity).await;
                 this.after_handshake(channel, res, conn_tx);
             }
             Err(x) => {
@@ -235,7 +236,6 @@ impl Connections {
             this.clone(),
             role,
             answer_tx,
-            false,
             conn_tx,
         ));
 
@@ -273,7 +273,6 @@ impl Connections {
             this.clone(),
             role,
             offer_tx,
-            true,
             sender,
         ));
 

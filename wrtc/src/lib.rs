@@ -59,6 +59,14 @@ impl WrtcDataChannel {
     pub fn raw_connection(&self) -> RawConnection {
         self.0.raw_connection()
     }
+
+    pub fn local_certificate_fingerprint(&self) -> Result<Vec<u8>> {
+        self.0.local_certificate_fingerprint()
+    }
+
+    pub fn remote_certificate_fingerprint(&self) -> Result<Vec<u8>> {
+        self.0.remote_certificate_fingerprint()
+    }
 }
 
 #[derive(Clone, Debug)]

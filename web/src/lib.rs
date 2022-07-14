@@ -1,7 +1,6 @@
 use std::{rc::Rc, time::Duration, cell::RefCell};
 
 use js_sys::{Uint8Array, Array, Object, Reflect, Function};
-use rand::{thread_rng, Rng};
 use sha3::{Shake128, digest::{Update, ExtendableOutput, XofReader}};
 use tracing::warn;
 use wasm_bindgen::{prelude::*, JsCast};
@@ -89,8 +88,6 @@ pub struct WebDht {
 #[wasm_bindgen]
 impl WebDht {
     pub async fn create(bootstrap: BootstrapData) -> Self {
-        let id = thread_rng().gen();
-
         let mut config: SystemConfig = Default::default();
         config.routing.max_routing_count = Some(64.try_into().unwrap());
         let mut tconfig: TransportConfig = Default::default();
@@ -100,7 +97,7 @@ impl WebDht {
 
         let bootstrap: Vec<String> = bootstrap.into_serde().expect("Invalid bootstrap value");
 
-        let (kad, shutdown, mut chan_open_rx) = create_dht(config, tconfig, id, bootstrap).await;
+        let (kad, shutdown, mut chan_open_rx) = create_dht(config, tconfig, bootstrap).await;
 
         let listener: Rc<RefCell<Option<Function>>> = Rc::new(RefCell::new(None));
         let chan_listener = listener.clone();

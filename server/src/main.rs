@@ -1,14 +1,12 @@
 use std::{net::SocketAddr, num::NonZeroU64, sync::Arc, time::Duration};
 
-use rand::{thread_rng, Rng};
 use reqwest::Url;
 use tracing::{info, span, Instrument, Level};
 use tracing_subscriber::{prelude::*, EnvFilter};
-use wdht_logic::{config::SystemConfig, Id, KademliaDht};
+use wdht_logic::{config::SystemConfig, KademliaDht};
 use wdht_transport::{create_dht, warp_filter::dht_connect, wrtc::WrtcSender, ShutdownSender, TransportConfig};
 
 use clap::{Args, Parser, Subcommand};
-use itertools::Itertools;
 
 /// Web-dht server (and tester client)
 #[derive(Parser, Debug)]
@@ -42,10 +40,6 @@ struct ServerArgs {
     #[clap(flatten)]
     common: CommonArgs,
 
-    /// Node ID (default is random)
-    #[clap(long)]
-    id: Option<Id>,
-
     /// Bind address
     #[clap(long, default_value = "127.0.0.1:3141")]
     bind: SocketAddr,
@@ -58,10 +52,6 @@ struct ClientArgs {
 
     #[clap(short = 'n', long, default_value = "1")]
     count: u32,
-
-    /// Nodes ID (default is random)
-    #[clap(long, multiple_values(true), multiple_occurrences(false))]
-    ids: Vec<Id>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -87,17 +77,15 @@ async fn main() {
     }
 }
 
-async fn start_kademlia(args: &CommonArgs, id: Option<Id>) -> (Arc<KademliaDht<WrtcSender>>, ShutdownSender) {
-    let id = id.unwrap_or_else(|| thread_rng().gen());
-
+async fn start_kademlia(args: &CommonArgs) -> (Arc<KademliaDht<WrtcSender>>, ShutdownSender) {
     let mut config: SystemConfig = Default::default();
     config.routing.max_routing_count = args.max_routing_count;
     let mut tconfig: TransportConfig = Default::default();
     tconfig.max_connections = args.max_connections;
     tconfig.stun_servers = args.stun_servers.iter().map(|x| x.to_string()).collect();
 
-    let span = span!(Level::INFO, "create_dht", %id);
-    let t = create_dht(config, tconfig, id, args.bootstrap.clone())
+    let span = span!(Level::INFO, "create_dht");
+    let t = create_dht(config, tconfig, args.bootstrap.clone())
         .instrument(span)
         .await;
 
@@ -113,12 +101,10 @@ async fn start_client(args: &ClientArgs) {
     let _kads = futures::future::join_all(
         (0..args.count)
             .into_iter()
-            .zip_longest(args.ids.clone())
-            .enumerate()
-            .map(|(i, x)| async move {
+            .map(|i| async move {
                 tokio::time::sleep(Duration::from_secs(5 * i as u64)).await;
                 info!("Starting client {i}");
-                start_kademlia(&args.common, x.right()).await
+                start_kademlia(&args.common).await
         }),
     )
     .await;
@@ -130,7 +116,7 @@ async fn start_client(args: &ClientArgs) {
 }
 
 async fn start_server(args: &ServerArgs) {
-    let (kad, _shutdown) = start_kademlia(&args.common, args.id).await;
+    let (kad, _shutdown) = start_kademlia(&args.common).await;
     info!("Starting up server");
 
     warp::serve(dht_connect(kad)).run(args.bind).await;

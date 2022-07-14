@@ -5,23 +5,17 @@ use wdht_logic::{
 };
 use wdht_wrtc::SessionDescription;
 
+use crate::serde::BytesOrB64;
+
 type WrtcOffer = SessionDescription;
 type WrtcAnswer = SessionDescription;
 
 #[derive(Debug, Deserialize, Serialize)]
-pub struct HandshakeRequest {
-    pub my_id: Id,
-    // TODO: encryption data
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub enum HandshakeResponse {
-    Ok {
-        my_id: Id, // TODO: encryption data
-    },
-    Error {
-        error: String,
-    },
+pub struct HandshakeRequest<'a> {
+    #[serde(borrow)]
+    pub identity: BytesOrB64<'a>,
+    #[serde(borrow)]
+    pub proof: BytesOrB64<'a>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

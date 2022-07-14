@@ -1,7 +1,6 @@
 use std::{borrow::Cow, collections::HashMap, fmt::Debug, sync::Mutex, time::Duration};
 
 use futures::future::join_all;
-use serde::Serialize;
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, span, warn, Instrument, Level};
@@ -14,7 +13,7 @@ use wdht_wasync::{sleep, spawn, Orc, Weak};
 
 use super::{
     protocol::{
-        HandshakeRequest, HandshakeResponse, WrtcMessage, WrtcPayload, WrtcRequest, WrtcResponse,
+        WrtcMessage, WrtcPayload, WrtcRequest, WrtcResponse,
     },
     Connections, WrtcTransportError,
 };
@@ -51,55 +50,6 @@ impl From<WrtcTransportError> for PeerMessageError {
 impl From<serde_json::Error> for PeerMessageError {
     fn from(x: serde_json::Error) -> Self {
         PeerMessageError::WrongFormat(x)
-    }
-}
-
-fn encode_data<T: Serialize>(data: &T) -> Result<Vec<u8>, PeerMessageError> {
-    serde_json::to_vec(data).map_err(|x| PeerMessageError::InternalError(Box::new(x)))
-}
-
-pub async fn handshake_passive(conn: &mut WrtcChannel, id: Id) -> Result<Id, PeerMessageError> {
-    let msg = conn
-        .listener
-        .recv()
-        .await
-        .ok_or(WrtcError::ConnectionLost)??
-        .data()
-        .ok_or(PeerMessageError::HandshakeError("opened channel".into()))?;
-    let req = serde_json::from_slice::<HandshakeRequest>(&msg)?;
-
-    let peer_id = req.my_id;
-
-    let ans = HandshakeResponse::Ok { my_id: id };
-    let msg = encode_data(&ans)?;
-    conn.sender
-        .send(&msg)
-        .map_err(|_| WrtcError::ConnectionLost)?;
-
-    Ok(peer_id)
-}
-
-pub async fn handshake_active(conn: &mut WrtcChannel, id: Id) -> Result<Id, PeerMessageError> {
-    let msg = encode_data(&HandshakeRequest { my_id: id })?;
-    conn.sender
-        .send(&msg)
-        .map_err(|_| WrtcError::ConnectionLost)?;
-
-    debug!("Waiting for handshake response...");
-    let msg = conn
-        .listener
-        .recv()
-        .await
-        .ok_or(WrtcError::ConnectionLost)??
-        .data()
-        .ok_or(PeerMessageError::HandshakeError("opened channel".into()))?;
-
-    let res = serde_json::from_slice::<HandshakeResponse>(&msg)?;
-
-    match res {
-        // The message has been sent from the other peer (so its their id)
-        HandshakeResponse::Ok { my_id } => Ok(my_id),
-        HandshakeResponse::Error { error } => Err(PeerMessageError::HandshakeError(error.into())),
     }
 }
 

@@ -60,6 +60,32 @@ impl WrtcDataChannel {
     pub fn raw_connection(&self) -> RawConnection {
         self.connection.connection.clone()
     }
+
+    fn desc_to_fingerprint(desc: &str) -> Result<Vec<u8>, WrtcError> {
+        let sdp = desc.as_bytes();
+        // Find fingerprint position
+        const PREFIX: &'static [u8] = b"\na=fingerprint:";
+        let pos = sdp.windows(PREFIX.len())
+            .position(|w| w == PREFIX)
+            .ok_or_else(|| WrtcError::RuntimeError("Cannot find fingerprint".into()))?;
+        // Remove fingerprint prefix
+        let sdp = &sdp[pos + PREFIX.len()..];
+        // Remove suffix
+        let sdp = sdp.split(|x| *x == b'\r').next().unwrap();
+        Ok(sdp.to_vec())
+    }
+
+    pub fn local_certificate_fingerprint(&self) -> Result<Vec<u8>, WrtcError> {
+        let desc = self.connection.connection.local_description()
+            .ok_or_else(|| WrtcError::RuntimeError("No local description".into()))?;
+        Self::desc_to_fingerprint(&desc.sdp())
+    }
+
+    pub fn remote_certificate_fingerprint(&self) -> Result<Vec<u8>, WrtcError> {
+        let desc = self.connection.connection.remote_description()
+            .ok_or_else(|| WrtcError::RuntimeError("No remote description".into()))?;
+        Self::desc_to_fingerprint(&desc.sdp())
+    }
 }
 
 #[instrument(skip_all)]
