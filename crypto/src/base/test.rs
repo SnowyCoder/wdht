@@ -1,6 +1,8 @@
 use super::*;
 use crate::Crypto;
 
+const CONTEXT: &'static [u8] = b"Some bit of context";
+
 #[ttest]
 async fn basic_test() {
     let backend = Crypto::new();
@@ -41,8 +43,8 @@ async fn verify_and_hash_test() {
     let backend = Crypto::new();
     let signed_data = "This data will be signed and verified".as_bytes();
 
-    /* // Generator
-    let pair = backend.generate_pair().await.unwrap();
+    // Generator
+    /*let pair = backend.generate_pair().await.unwrap();
     let signed = backend.sign(&pair, signed_data).await.unwrap();
     let pubkey = backend.export_public_key(&pair);
     panic!("pub: {}, sig: {}", hex::encode(pubkey), hex::encode(signed));*/
@@ -54,8 +56,8 @@ async fn verify_and_hash_test() {
     let pub_key = backend.import_pub(&pub_key_data).await.unwrap();
     assert!(backend.verify(&pub_key, &signature, signed_data).await);
 
-    let hash = backend.hash(&pub_key_data).await.expect("Hashing failed");
-    assert!(hex::encode(hash) == "1783119fcd8f4ed68342725c407ad22ffa5ef038f08a4c04a67aca0fe29e61ba");
+    let hash = backend.hash_key(&CONTEXT, &pub_key_data).await.expect("Hashing failed");
+    assert!(hex::encode(hash) == "4bf8fe89edabad690009a3a02a00fc9b80d68293e314735e00e50b762ab95b6b");
 }
 
 #[ttest]
@@ -70,6 +72,6 @@ async fn verify_and_hash_test2() {
     let pub_key = backend.import_pub(&pub_key_data).await.unwrap();
     assert!(backend.verify(&pub_key, &signature, signed_data).await);
 
-    let hash = backend.hash(&pub_key_data).await.expect("Hashing failed");
-    assert!(hex::encode(hash) == "926c54a654215c1cefbf01812239bfb835ee77abd6bb6a81c294ca37103309ee");
+    let hash = backend.hash_key(&CONTEXT, &pub_key_data).await.expect("Hashing failed");
+    assert!(hex::encode(hash) == "ddc6c90b1238fab5663118e4b865eeb4430fce9f1f02ceae8fbd41b188799022");
 }

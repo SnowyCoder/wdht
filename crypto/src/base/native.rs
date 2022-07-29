@@ -54,9 +54,10 @@ impl Backend {
         key.encoded.as_bytes()
     }
 
-    pub async fn hash(&self, data: &[u8]) -> Result<[u8; HASH_SIZE]> {
+    pub async fn hash_key(&self, context: &[u8], data: &[u8]) -> Result<[u8; HASH_SIZE]> {
         let mut hasher = Sha256::new();
 
+        hasher.update(context);
         hasher.update(data);
         Ok(hasher.finalize().as_slice().try_into().unwrap())
     }

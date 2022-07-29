@@ -1,6 +1,7 @@
 use wdht_crypto::{SigningKey, Crypto};
 use wdht_logic::{Id, consts::ID_LEN};
 
+const KEY_HASH_CONTEXT: &'static [u8] = b"wdht.transport.identity";
 
 pub struct Identity {
     crypto: Crypto,
@@ -24,7 +25,7 @@ impl Identity {
     }
 
     async fn compute_identity(&self, key: &[u8]) -> Id {
-        let hash_data = self.crypto.hash(key).await.expect("Failed to generate crypto ID");
+        let hash_data = self.crypto.hash_key(&KEY_HASH_CONTEXT, key).await.expect("Failed to generate crypto ID");
         // Truncate hashed bytes into ID (hash is 256 bitsm ID should be 160 bits)
         let mut id = Id::ZERO;
         id.0[..ID_LEN].copy_from_slice(&hash_data[..ID_LEN]);

@@ -74,10 +74,13 @@ impl Backend {
     }
 
 
-    pub async fn hash(&self, data: &[u8]) -> Result<[u8; HASH_SIZE]> {
-        // Safety: the first step of sign requires copying the buffer.
-        let data: Uint8Array = unsafe { Uint8Array::view(data) };
-        let promise = self.subtle.digest_with_str_and_buffer_source("SHA-256", &data)
+    pub async fn hash_key(&self, context: &[u8], data: &[u8]) -> Result<[u8; HASH_SIZE]> {
+        let full_data = [context, data].concat();
+
+        // Safety: The first step of the digest operation is to clone the data.
+        let full_data_view: Uint8Array = unsafe { Uint8Array::view(&full_data) };
+
+        let promise = self.subtle.digest_with_str_and_buffer_source("SHA-256", &full_data_view)
             .map_err_internal()?;
         let buffer: ArrayBuffer = JsFuture::from(promise).await.map_err_internal()?.unchecked_into();
         let mut res_data = [0u8; HASH_SIZE];

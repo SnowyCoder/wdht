@@ -45,7 +45,7 @@ impl Crypto {
         self.0.export_public_key(&key.0)
     }
 
-    pub async fn hash(&self, data: &[u8]) -> Result<[u8; HASH_SIZE]> {
-        self.0.hash(&data).await
+    pub async fn hash_key(&self, context: &[u8], data: &[u8]) -> Result<[u8; HASH_SIZE]> {
+        self.0.hash_key(&context, &data).await
     }
 }
