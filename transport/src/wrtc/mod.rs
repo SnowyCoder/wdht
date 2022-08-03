@@ -1,13 +1,14 @@
 use std::{
     collections::{HashMap, VecDeque},
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU64, Ordering, AtomicBool},
         Mutex,
     }, time::Duration,
 };
 
 use async_broadcast as broadcast;
-use tokio::sync::{oneshot, mpsc};
+use broadcast::TrySendError;
+use tokio::sync::oneshot;
 use tracing::{debug, error, event, info, warn, Level};
 use wdht_logic::{
     config::SystemConfig,
@@ -19,10 +20,10 @@ use wdht_wrtc::{
     create_channel, ConnectionRole, RtcConfig, SessionDescription, WrtcChannel, WrtcError,
 };
 
-use crate::{ChannelOpenEvent, TransportConfig, identity::Identity};
+use crate::{TransportConfig, identity::Identity, events::{TransportEvent, DisconnectReason}};
 
 use self::{
-    conn::{PeerMessageError, WrtcConnection},
+    conn::WrtcConnection,
     connector::{ContactResult, CreatingConnectionSender, WrtcConnector},
 };
 
@@ -33,7 +34,7 @@ mod handshake;
 mod protocol;
 mod sender;
 
-pub use error::WrtcTransportError;
+pub use error::{WrtcTransportError, HandshakeError};
 pub use sender::{WrtcContact, WrtcSender};
 
 pub struct Connections {
@@ -41,32 +42,37 @@ pub struct Connections {
     pub self_id: Id, // Same ase dht.upgrade().unwrap().id
     pub config: TransportConfig,
     pub identity: Identity,
+    is_shutting_down: AtomicBool,
+    // Notice connected count <= connection count, when a clients tries to connect it is not yet connected but it allocates a connection
     connection_count: AtomicU64,
+    connected_count: AtomicU64,
     // TODO: use some locking hashmap?
     pub connections: Mutex<HashMap<Id, Orc<WrtcConnection>>>,
     half_closed_connections: Mutex<VecDeque<Id>>,
     half_closed_count: AtomicU64,
     pub connector: Orc<WrtcConnector>,
-    channel_open_tx: mpsc::Sender<ChannelOpenEvent>,
+    events_tx: broadcast::Sender<TransportEvent>,
 }
 
 impl Connections {
-    pub async fn create(config: SystemConfig, tconfig: TransportConfig, channel_open_tx: mpsc::Sender<ChannelOpenEvent>) -> Orc<KademliaDht<WrtcSender>> {
+    pub async fn create(config: SystemConfig, tconfig: TransportConfig, events_tx: broadcast::Sender<TransportEvent>) -> Orc<KademliaDht<WrtcSender>> {
         let identity = Identity::generate().await;
         let id = identity.generate_id().await;
 
         Orc::new_cyclic(|weak_dht| {
             let connections = Orc::new(Connections {
                 dht: weak_dht.clone(),
+                self_id: id,
                 config: tconfig,
                 identity,
-                self_id: id,
-                connections: Mutex::new(HashMap::new()),
+                is_shutting_down: AtomicBool::new(false),
                 connection_count: AtomicU64::new(0),
-                half_closed_count: AtomicU64::new(0),
+                connected_count: AtomicU64::new(0),
+                connections: Mutex::new(HashMap::new()),
                 half_closed_connections: Mutex::new(VecDeque::new()),
+                half_closed_count: AtomicU64::new(0),
                 connector: Orc::new(WrtcConnector::new(id)),
-                channel_open_tx
+                events_tx
             });
             let sender = WrtcSender(connections);
 
@@ -74,17 +80,17 @@ impl Connections {
         })
     }
 
-    fn after_handshake(
+    async fn after_handshake(
         self: Orc<Self>,
         channel: WrtcChannel,
-        res: Result<Id, PeerMessageError>,
+        res: Result<Id, HandshakeError>,
         conn_tx: CreatingConnectionSender,
     ) {
         let id = match res {
             Ok(x) => x,
-            Err(x) => {
-                warn!("Handshake error {}", x);
-                conn_tx.send(Err(TransportError::HandshakeError));
+            Err(e) => {
+                warn!("Handshake error {e}");
+                conn_tx.send(Err(WrtcTransportError::Handshake(e)));
                 self.connection_count.fetch_sub(1, Ordering::SeqCst);
                 return;
             }
@@ -94,13 +100,16 @@ impl Connections {
             self.connection_count.fetch_sub(1, Ordering::SeqCst);
             return;
         }
+        self.connected_count.fetch_add(1, Ordering::SeqCst);
         debug!("{} connected", id);
         let connection = conn::WrtcConnection::new(id, channel, Orc::downgrade(&self));
 
         {
             let mut conns = self.connections.lock().unwrap();
             if conns.contains_key(&id) {
-                event!(Level::ERROR, kad_id=%self.self_id, "Same id connection conflict!");
+                // This might happen because of bootstrap retrial mechanisms.
+                event!(Level::DEBUG, kad_id=%self.self_id, peer_id=%id, "Same id connection conflict, dropping new connection");
+                conn_tx.send(Err(WrtcTransportError::Handshake(HandshakeError::IdConflict(id))));
                 return;
             }
             conns.insert(id, connection.clone());
@@ -110,10 +119,15 @@ impl Connections {
             connection.set_dont_cleanup(x.on_connect(id));
         }
         let connection = WrtcContact::Other(connection);
-        conn_tx.send(Ok(connection));
+        conn_tx.send(Ok(connection.clone()));
+        // Ignore channel closed errors
+        let _ = self.events_tx.broadcast(TransportEvent::Connect(connection)).await;
     }
 
     fn alloc_connection(self: &Orc<Self>) -> bool {
+        if self.is_shutting_down.load(Ordering::SeqCst) {
+            return false;
+        }
         let limit = match self.config.max_connections {
             Some(x) => x,
             None => {
@@ -169,7 +183,8 @@ impl Connections {
         };
         // Do not update the connection count, and don't even update the half-closed queue
         // (we already took care of that)
-        self.on_disconnect(id, false, false);
+        self.connected_count.fetch_sub(1, Ordering::SeqCst);
+        self.on_disconnect(id, DisconnectReason::HalfCloseReplace, false, false);
         conn.shutdown_local();
         true
     }
@@ -202,7 +217,7 @@ impl Connections {
         match channel {
             Ok(mut channel) => {
                 let res = handshake::handshake(&mut channel, &this.identity).await;
-                this.after_handshake(channel, res, conn_tx);
+                this.after_handshake(channel, res, conn_tx).await;
             }
             Err(x) => {
                 this.connection_count.fetch_sub(1, Ordering::SeqCst);
@@ -305,14 +320,12 @@ impl Connections {
         Ok((offer, answer_tx, conn_rx))
     }
 
-    fn on_disconnect(&self, peer_id: Id, update_conn_count: bool, was_half_closed: bool) {
-        info!(
-            "{} disconnected (half_closed: {})",
-            peer_id, was_half_closed
-        );
+    fn on_disconnect(&self, peer_id: Id, reason: DisconnectReason, update_conn_count: bool, was_half_closed: bool) {
+        info!("{peer_id} disconnected (half_closed: {was_half_closed})");
         self.connections.lock().unwrap().remove(&peer_id);
         if update_conn_count {
             self.connection_count.fetch_sub(1, Ordering::SeqCst);
+            self.connected_count.fetch_sub(1, Ordering::SeqCst);
         }
 
         if was_half_closed {
@@ -330,11 +343,33 @@ impl Connections {
         if let Some(dht) = self.dht.upgrade() {
             dht.on_disconnect(peer_id);
         }
+        // Ignore channel closed errors
+        if let Err(TrySendError::Full(_)) = self.events_tx.try_broadcast(TransportEvent::Disconnect(peer_id, reason)) {
+            warn!("Event channel is full, dropping disconnect event");
+        }
     }
 
     pub(crate) fn on_half_closed(&self, conn: Id) {
         info!("{} half_closed", conn);
         self.half_closed_connections.lock().unwrap().push_back(conn);
         self.half_closed_count.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub fn shutdown(&self) {
+        if self.is_shutting_down.swap(true, Ordering::SeqCst) {
+            return;// Already shut down
+        }
+        let drain: Vec<_> = self.connections.lock().unwrap().drain().map(|x| x.1).collect();
+        for conn in drain {
+            self.on_disconnect(conn.peer_id, DisconnectReason::ShuttingDown, true, false);
+            conn.shutdown_local();
+        }
+        let _ = self.events_tx.try_broadcast(TransportEvent::Shutdown);
+    }
+}
+
+impl Drop for Connections {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }

@@ -205,7 +205,7 @@ impl<T: TransportSender> TransportListener for KademliaDht<T> {
         self.tree.lock().unwrap().remove(id);
     }
 
-    #[instrument(skip(self), fields(kad_id=%self.id, %sender))]
+    #[instrument(level = "debug", skip(self), fields(kad_id=%self.id, %sender))]
     fn on_request(&self, sender: Id, message: Request) -> Response {
         debug!("Request: {:?}", message);
         let mut tree = self.tree.lock().unwrap();

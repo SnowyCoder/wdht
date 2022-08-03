@@ -16,14 +16,16 @@ wdht-transport = { path = "../transport", version = "0.1", default-features = fa
 tokio = { version = "1.18", features = [], default-features = false }
 
 reqwest = { version = "0.11", features = ["json"], default-features = false}
-getrandom = { version = "0.2.6", features = ["js"] }
 wasm-bindgen = "0.2.80"
 rand = "0.8.5"
 wasm-bindgen-futures = "0.4.30"
-parking_lot = { version = "0.11.1", features = ["wasm-bindgen"]}
 tracing-wasm = "0.2.1"
 console_error_panic_hook = { version = "0.1.7", optional = true }
 gloo-timers = { version = "0.2.4", features = ["futures"] }
 js-sys = "0.3.58"
 tracing = { version = "0.1.35", features = ["max_level_info", "release_max_level_warn"] }
 sha3 = "0.10.1"
+
+# Required for wasm building!
+getrandom = { version = "0.2.6", features = ["js"] }
+instant = { version = "0.1", features = [ "wasm-bindgen", "inaccurate" ] }

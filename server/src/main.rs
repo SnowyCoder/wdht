@@ -4,7 +4,7 @@ use reqwest::Url;
 use tracing::{info, span, Instrument, Level};
 use tracing_subscriber::{prelude::*, EnvFilter};
 use wdht_logic::{config::SystemConfig, KademliaDht};
-use wdht_transport::{create_dht, warp_filter::dht_connect, wrtc::WrtcSender, ShutdownSender, TransportConfig};
+use wdht_transport::{create_dht, warp_filter::dht_connect, wrtc::WrtcSender, TransportConfig};
 
 use clap::{Args, Parser, Subcommand};
 
@@ -77,7 +77,7 @@ async fn main() {
     }
 }
 
-async fn start_kademlia(args: &CommonArgs) -> (Arc<KademliaDht<WrtcSender>>, ShutdownSender) {
+async fn start_kademlia(args: &CommonArgs) -> Arc<KademliaDht<WrtcSender>> {
     let mut config: SystemConfig = Default::default();
     config.routing.max_routing_count = args.max_routing_count;
     let mut tconfig: TransportConfig = Default::default();
@@ -89,7 +89,7 @@ async fn start_kademlia(args: &CommonArgs) -> (Arc<KademliaDht<WrtcSender>>, Shu
         .instrument(span)
         .await;
 
-    (t.0, t.1)
+    t.0
 }
 
 async fn start_client(args: &ClientArgs) {
@@ -116,7 +116,7 @@ async fn start_client(args: &ClientArgs) {
 }
 
 async fn start_server(args: &ServerArgs) {
-    let (kad, _shutdown) = start_kademlia(&args.common).await;
+    let kad = start_kademlia(&args.common).await;
     info!("Starting up server");
 
     warp::serve(dht_connect(kad)).run(args.bind).await;

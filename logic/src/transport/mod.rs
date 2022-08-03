@@ -121,7 +121,7 @@ pub enum TransportError {
     ContactLost,
 
     #[error("Error occurred while performing handshake")]
-    HandshakeError,
+    Handshake,
 
     #[error("Unknown transport error {0}")]
     UnknownError(Cow<'static, str>),

@@ -4,23 +4,23 @@ use wdht_wrtc::{WrtcChannel, WrtcError};
 
 use crate::identity::Identity;
 
-use super::{conn::PeerMessageError, protocol::{HandshakeRequest}};
+use super::{protocol::{HandshakeRequest}, error::HandshakeError};
 
-fn encode_data<T: Serialize>(data: &T) -> Result<Vec<u8>, PeerMessageError> {
-    serde_json::to_vec(data).map_err(|x| PeerMessageError::InternalError(Box::new(x)))
+fn encode_data<T: Serialize>(data: &T) -> Result<Vec<u8>, HandshakeError> {
+    serde_json::to_vec(data).map_err(|_| HandshakeError::Internal("Error encoding data"))
 }
 
-async fn receive_message(chan: &mut WrtcChannel) -> Result<Vec<u8>, PeerMessageError> {
+async fn receive_message(chan: &mut WrtcChannel) -> Result<Vec<u8>, HandshakeError> {
     chan
         .listener
         .recv()
         .await
-        .ok_or(WrtcError::ConnectionLost)??
+        .ok_or(HandshakeError::ConnectionLost)??
         .data()
-        .ok_or(PeerMessageError::HandshakeError("opened channel".into()))
+        .ok_or(HandshakeError::OpenedChannel)
 }
 
-pub async fn handshake(conn: &mut WrtcChannel, identity: &Identity) -> Result<Id, PeerMessageError> {
+pub async fn handshake(conn: &mut WrtcChannel, identity: &Identity) -> Result<Id, HandshakeError> {
     // Compute local proof
     let fp = conn.sender.local_certificate_fingerprint()?;
     let proof = identity.create_proof(&fp).await;
@@ -41,7 +41,7 @@ pub async fn handshake(conn: &mut WrtcChannel, identity: &Identity) -> Result<Id
     // Check remote proof and derive ID
     let other_fingerprint = conn.sender.remote_certificate_fingerprint()?;
     let peer_id = identity.check_identity_proof(&req.identity, &other_fingerprint, &req.proof).await
-        .map_err(|_| PeerMessageError::HandshakeError("invalid identity".into()))?;
+        .map_err(|_| HandshakeError::InvalidIdentity)?;
 
     Ok(peer_id)
 }

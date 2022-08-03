@@ -1,15 +1,17 @@
-use std::{borrow::Cow, collections::HashMap, fmt::Debug, sync::Mutex, time::Duration};
+use std::{collections::HashMap, fmt::Debug, sync::Mutex, time::Duration};
 
 use futures::future::join_all;
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
-use tracing::{debug, info, span, warn, Instrument, Level};
+use tracing::{debug, span, warn, Instrument, Level};
 use wdht_logic::{
     transport::{TransportError, TransportListener},
     Id,
 };
 use wdht_wrtc::{WrtcChannel, WrtcDataChannel, WrtcError, RawConnection, WrtcEvent, RawChannel};
 use wdht_wasync::{sleep, spawn, Orc, Weak};
+
+use crate::events::{TransportEvent, ChannelOpenEvent, DisconnectReason};
 
 use super::{
     protocol::{
@@ -25,12 +27,8 @@ pub enum PeerMessageError {
     TransportError(WrtcTransportError),
     #[error("Wrong message format: {0}")]
     WrongFormat(serde_json::Error),
-    #[error("Handshake error: {0}")]
-    HandshakeError(Cow<'static, str>),
     #[error("Unknown answer id")]
     UnknownAnswerId,
-    #[error("Internal error: {0}")]
-    InternalError(Box<dyn std::error::Error>),
     #[error("Unknown internal error: {0}")]
     UnknownInternalError(&'static str),
 }
@@ -167,7 +165,7 @@ impl WrtcConnection {
                     Some(x) => x,
                     None => return Err(TransportError::ConnectionLost),
                 };
-                this.shutdown("Timeout expired");
+                this.shutdown(DisconnectReason::TimeoutExpired);
                 Err(TransportError::ConnectionLost)
             }
             x = reply => {
@@ -181,11 +179,11 @@ impl WrtcConnection {
 
     fn send_response(&self, id: u32, res: WrtcResponse) {
         if self.inner.lock().unwrap().send_response(id, res).is_err() {
-            self.shutdown("Failed to send message");
+            self.shutdown(DisconnectReason::SendFail);
         }
     }
 
-    fn shutdown(&self, reason: &'static str) {
+    fn shutdown(&self, reason: DisconnectReason) {
         debug!("Shutting down connection: {reason}");
         let parent = match self.parent.upgrade() {
             Some(x) => x,
@@ -194,6 +192,7 @@ impl WrtcConnection {
         parent.connections.lock().unwrap().remove(&self.peer_id);
         parent.on_disconnect(
             self.peer_id,
+            reason,
             true,
             self.inner.lock().unwrap().this_half_closed,
         );
@@ -226,7 +225,7 @@ impl WrtcConnection {
             inner.other_half_closed
         };
         if other_half_closed {
-            self.shutdown("Both halfes closed (sent)");
+            self.shutdown(DisconnectReason::HalfCloseBoth);
         } else {
             if let Some(x) = self.parent.upgrade() {
                 x.on_half_closed(self.peer_id);
@@ -330,7 +329,7 @@ fn process_message(msg: &[u8], conn: Orc<WrtcConnection>) -> Result<(), PeerMess
             inner.other_half_closed = true;
             if inner.this_half_closed {
                 drop(inner);
-                conn.shutdown("Both halfes closed (received)");
+                conn.shutdown(DisconnectReason::HalfCloseBoth);
             }
         }
     }
@@ -345,11 +344,11 @@ async fn process_channel(channel: RawChannel, conn: Orc<WrtcConnection>) -> Resu
         .ok_or(PeerMessageError::UnknownInternalError("Shutting down"))?;
 
     let connection = conn.inner.lock().unwrap().channel.raw_connection().clone();
-    let _ = root.channel_open_tx.send(crate::ChannelOpenEvent {
+    let _ = root.events_tx.broadcast(TransportEvent::ChannelOpen(ChannelOpenEvent {
         id: conn.peer_id,
         connection,
         channel,
-    }).await;
+    })).await;
     Ok(())
 }
 
@@ -357,6 +356,7 @@ async fn connection_listen(
     mut mex_rx: mpsc::Receiver<Result<WrtcEvent, WrtcError>>,
     conn: Weak<WrtcConnection>,
 ) {
+    // TODO: add proper shutdown reason
     while let Some(msg) = mex_rx.recv().await {
         match (msg, conn.upgrade()) {
             (Ok(WrtcEvent::OpenChannel(x)), Some(conn)) => {
@@ -372,7 +372,7 @@ async fn connection_listen(
                 }
             }
             (Err(WrtcError::ConnectionLost), _) | (_, None) => {
-                info!("Connection lost");
+                debug!("Connection lost");
                 break;
             }
             (Err(x), _) => {
@@ -382,6 +382,6 @@ async fn connection_listen(
         }
     }
     if let Some(x) = conn.upgrade() {
-        x.shutdown("Connection lost");
+        x.shutdown(DisconnectReason::ConnectionLost);
     }
 }

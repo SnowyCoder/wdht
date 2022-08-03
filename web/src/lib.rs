@@ -1,12 +1,13 @@
 use std::{rc::Rc, time::Duration, cell::RefCell};
 
 use js_sys::{Uint8Array, Array, Object, Reflect, Function};
+use reqwest::Url;
 use sha3::{Shake128, digest::{Update, ExtendableOutput, XofReader}};
 use tracing::warn;
 use wasm_bindgen::{prelude::*, JsCast};
 use wasm_bindgen_futures::{future_to_promise, spawn_local};
 use wdht_logic::{config::SystemConfig, KademliaDht, Id, search::BasicSearchOptions, transport::{TopicEntry, Contact}};
-use wdht_transport::{create_dht, wrtc::WrtcSender, ShutdownSender, TransportConfig};
+use wdht_transport::{create_dht, wrtc::WrtcSender, TransportConfig, events::TransportEvent};
 
 // When the `wee_alloc` feature is enabled, use `wee_alloc` as the global
 // allocator.
@@ -81,13 +82,12 @@ extern "C" {
 pub struct WebDht {
     kad: Rc<KademliaDht<WrtcSender>>,
     channel_open_listener: Rc<RefCell<Option<Function>>>,
-    _shutdown: ShutdownSender,
 }
 
 
 #[wasm_bindgen]
 impl WebDht {
-    pub async fn create(bootstrap: BootstrapData) -> Self {
+    pub async fn create(bootstrap: BootstrapData) -> Result<WebDht, JsValue> {
         let mut config: SystemConfig = Default::default();
         config.routing.max_routing_count = Some(64.try_into().unwrap());
         let mut tconfig: TransportConfig = Default::default();
@@ -96,38 +96,55 @@ impl WebDht {
         tconfig.stun_servers = vec!["stun:stun.l.google.com:19302".to_owned()];
 
         let bootstrap: Vec<String> = bootstrap.into_serde().expect("Invalid bootstrap value");
+        let bootstrap2: Vec<Url> = bootstrap.into_iter()
+            .map(|x| x.parse())
+            .collect::<Result<Vec<Url>, _>>()
+            .map_err(|x| JsValue::from(format!("Invalid URL: {x}")))?;
 
-        let (kad, shutdown, mut chan_open_rx) = create_dht(config, tconfig, bootstrap).await;
+        let (kad, mut events_rx) = create_dht(config, tconfig, bootstrap2).await;
 
         let listener: Rc<RefCell<Option<Function>>> = Rc::new(RefCell::new(None));
         let chan_listener = listener.clone();
         spawn_local(async move {
-            while let Some(chan) = chan_open_rx.recv().await {
-                if let Some(x) = chan_listener.borrow_mut().as_ref() {
-                    let event = Object::new();
-                    Reflect::set(&event, &"peer_id".into(), &chan.id.as_short_hex().into()).unwrap();
-                    Reflect::set(&event, &"channel".into(), &chan.channel).unwrap();
-                    Reflect::set(&event, &"connection".into(), &chan.connection).unwrap();
-                    if let Err(x) = x.call1(
-                        &JsValue::UNDEFINED,
-                        &event,
-                    ) {
-                        warn!("open_data_channel handler returned error: {x:?}");
-                    }
+            loop {
+                let ev = match events_rx.recv().await {
+                    Ok(x) => x,
+                    Err(_) => break,
+                };
+                match ev {
+                    TransportEvent::ChannelOpen(chan) => {
+                        if let Some(x) = chan_listener.borrow_mut().as_ref() {
+                            let event = Object::new();
+                            Reflect::set(&event, &"peer_id".into(), &chan.id.as_short_hex().into()).unwrap();
+                            Reflect::set(&event, &"channel".into(), &chan.channel).unwrap();
+                            Reflect::set(&event, &"connection".into(), &chan.connection).unwrap();
+                            if let Err(x) = x.call1(
+                                &JsValue::UNDEFINED,
+                                &event,
+                            ) {
+                                warn!("open_data_channel handler returned error: {x:?}");
+                            }
+                        }
+                    },
+                    _ => {},
                 }
             }
         });
 
-        WebDht {
+        Ok(WebDht {
             kad,
             channel_open_listener: listener,
-            _shutdown: shutdown,
-        }
+        })
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn raw_connection_count(&self) -> u32 {
+        self.kad.transport().connection_count() as u32
     }
 
     #[wasm_bindgen(getter)]
     pub fn connection_count(&self) -> u32 {
-        self.kad.transport().connection_count() as u32
+        self.kad.transport().connected_count() as u32
     }
 
     #[wasm_bindgen(getter)]

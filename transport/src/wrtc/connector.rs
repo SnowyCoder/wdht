@@ -8,7 +8,7 @@ use async_broadcast as broadcast;
 use futures::future::join_all;
 use tokio::sync::oneshot;
 use tracing::{error, event, Level};
-use wdht_logic::{transport::TransportError, Id};
+use wdht_logic::Id;
 use wdht_wrtc::SessionDescription;
 use wdht_wasync::Orc;
 
@@ -18,7 +18,7 @@ use super::{
     Connections, WrtcContact, WrtcTransportError,
 };
 
-pub type ContactResult = Result<WrtcContact, TransportError>;
+pub type ContactResult = Result<WrtcContact, WrtcTransportError>;
 
 #[derive(Clone)]
 pub struct CreatingConnectionSender {
@@ -166,7 +166,7 @@ impl WrtcConnector {
 
     async fn connect_to(
         &self,
-        conn: &Orc<Connections>,
+        conn: Orc<Connections>,
         ids: Vec<(Id, CreatingConnectionSender)>,
         referrer: Orc<WrtcConnection>,
     ) {
@@ -178,13 +178,15 @@ impl WrtcConnector {
         };
 
         // Create N active connections
+        let c = &conn;
         let offers = join_all(ids.into_iter().map(|(id, connector)| async move {
-            conn.clone()
+            c.clone()
                 .create_active_with_connector(connector)
                 .await
                 .map(|(desc, sender)| (id, desc, sender))
         }))
         .await;
+        drop(conn);
 
         // map each new offer to an id, this will return
         // Vec<(id, offer)>, Vec<(id, answer_receiver, connection_receiver, connection_sender)>
@@ -246,7 +248,7 @@ impl WrtcConnector {
 
     pub async fn connect_all(
         self: &Orc<Self>,
-        conn: &Orc<Connections>,
+        conn: Orc<Connections>,
         referrer: Orc<WrtcConnection>,
         ids: Vec<Id>,
     ) -> Vec<ContactResult> {

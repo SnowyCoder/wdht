@@ -16,7 +16,7 @@ use super::{
 
 async fn resolve_nodes(
     referrer: Orc<WrtcConnection>,
-    conn: &Orc<Connections>,
+    conn: Orc<Connections>,
     ids: Vec<Id>,
 ) -> Result<Vec<WrtcContact>, TransportError> {
     // Collect old_contacts (contacts already known)
@@ -42,7 +42,8 @@ async fn resolve_nodes(
         return Ok(old_contacts.into_iter().map(|x| x.unwrap()).collect());
     }
 
-    let new_contacts = conn.connector.connect_all(conn, referrer, to_query).await;
+    // Clone the connector Rc, so that we free the Connections Rc (and it gets GC correctly)
+    let new_contacts = conn.connector.clone().connect_all(conn, referrer, to_query).await;
 
     // Piece back together old contacts and new contacts
     let mut new_contacts = new_contacts.into_iter();
@@ -71,7 +72,7 @@ async fn translate_response(
 ) -> Result<RawResponse<WrtcContact>, TransportError> {
     use RawResponse::*;
     Ok(match res {
-        FoundNodes(nodes) => FoundNodes(resolve_nodes(contact, &conn, nodes).await?),
+        FoundNodes(nodes) => FoundNodes(resolve_nodes(contact, conn, nodes).await?),
         FoundData(x) => FoundData(x),
         Done => Done,
         Error => Error,
@@ -83,7 +84,11 @@ pub struct WrtcSender(pub(crate) Orc<Connections>);
 
 impl WrtcSender {
     pub fn connection_count(&self) -> u64 {
-        self.0.connection_count.load(Ordering::Relaxed)
+        self.0.connection_count.load(Ordering::SeqCst)
+    }
+
+    pub fn connected_count(&self) -> u64 {
+        self.0.connected_count.load(Ordering::SeqCst)
     }
 }
 
