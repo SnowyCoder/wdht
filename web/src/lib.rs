@@ -2,18 +2,19 @@ use std::{rc::Rc, time::Duration, cell::RefCell};
 
 use js_sys::{Uint8Array, Array, Object, Reflect, Function};
 use reqwest::Url;
-use sha3::{Shake128, digest::{Update, ExtendableOutput, XofReader}};
 use tracing::warn;
 use wasm_bindgen::{prelude::*, JsCast};
 use wasm_bindgen_futures::{future_to_promise, spawn_local};
-use wdht_logic::{config::SystemConfig, KademliaDht, Id, search::BasicSearchOptions, transport::{TopicEntry, Contact}};
-use wdht_transport::{create_dht, wrtc::WrtcSender, TransportConfig, events::TransportEvent};
+use wdht::{create_dht, TransportConfig, events::TransportEvent, Dht, logic::{Id, config::SystemConfig, search::BasicSearchOptions, transport::{TopicEntry, Contact}, consts::ID_LEN}};
+use wdht_crypto::sha2_hash;
 
 // When the `wee_alloc` feature is enabled, use `wee_alloc` as the global
 // allocator.
 #[cfg(feature = "wee_alloc")]
 #[global_allocator]
 static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
+
+const TOPIC_HASH_CONTEXT: &'static [u8] = b"wdht.topic";
 
 #[wasm_bindgen(start)]
 pub fn on_start() {
@@ -80,7 +81,7 @@ extern "C" {
 
 #[wasm_bindgen]
 pub struct WebDht {
-    kad: Rc<KademliaDht<WrtcSender>>,
+    kad: Rc<Dht>,
     channel_open_listener: Rc<RefCell<Option<Function>>>,
 }
 
@@ -155,7 +156,7 @@ impl WebDht {
     pub fn insert(&self, topic: Topic, lifetime: f64, value: Option<Uint8Array>) -> InsertPromise {
         let kad = self.kad.clone();
         let fut = async move {
-            let key = parse_topic(topic)?;
+            let key = parse_topic(topic).await?;
 
             let lifetime = Duration::from_secs_f64(lifetime);
 
@@ -169,7 +170,7 @@ impl WebDht {
     pub fn remove(&self, topic: Topic) -> RemovePromise {
         let kad = self.kad.clone();
         let fut = async move {
-            let key = parse_topic(topic)?;
+            let key = parse_topic(topic).await?;
 
             let count = kad.remove(key).await;
             Ok((count as u32).into())
@@ -180,7 +181,7 @@ impl WebDht {
     pub fn query(&self, topic: Topic, limit: u32) -> QueryPromise {
         let kad = self.kad.clone();
         let fut = async move {
-            let key = parse_topic(topic)?;
+            let key = parse_topic(topic).await?;
 
             let search_options = BasicSearchOptions {
                 parallelism: 4,
@@ -214,9 +215,9 @@ impl WebDht {
     }
 }
 
-fn parse_topic(topic: Topic) -> Result<Id, JsValue> {
+async fn parse_topic(topic: Topic) -> Result<Id, JsValue> {
     if let Some(x) = topic.as_string() {
-        return Ok(hash_key(x)?);
+        return Ok(hash_key(x).await?);
     }
     if !topic.is_object() {
         return Err("Invalid topic type".into());
@@ -232,23 +233,21 @@ fn parse_topic(topic: Topic) -> Result<Id, JsValue> {
     let key = get_or_invalid("key")?;
 
     let res = match ttype.as_str() {
-        "topic" => hash_key(key)?,
+        "topic" => hash_key(key).await?,
         "raw_id" => key.parse::<Id>().map_err(|x| format!("Failed to parse raw id: {}", x.to_string()))?,
         _ => Err("Unrecognized topic type")?,
     };
     Ok(res)
 }
 
-fn hash_key(key: String) -> Result<Id, &'static str> {
+async fn hash_key(key: String) -> Result<Id, &'static str> {
     if key.is_empty() {
         return Err("Key is empty");
     }
-    let mut hasher = Shake128::default();
-    hasher.update(b"kad_query");
-    hasher.update(key.as_bytes());
-    let mut reader = hasher.finalize_xof();
+    let hash_data = sha2_hash(&TOPIC_HASH_CONTEXT, key.as_bytes()).await
+        .map_err(|_| "Cryptographic error")?;
     let mut id = Id::ZERO;
-    reader.read(&mut id.0);
+    id.0[..ID_LEN].copy_from_slice(&hash_data[..ID_LEN]);
     Ok(id)
 }
 

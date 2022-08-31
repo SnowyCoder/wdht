@@ -7,6 +7,18 @@ use web_sys::{window, SubtleCrypto, CryptoKey};
 
 use crate::{error::{Result, CryptoError}, HASH_SIZE};
 
+fn context() -> &'static CryptoContext {
+    // Lord please forgive me
+    // We cannot use once_cell since data is not thread-safe, we cannot use thread_local directly
+    // since we need a 'static lifetime (or else async/await would not work...)
+    // This is all that I could come up with, should only "leak" one value per thread,
+    // so only one vale in borwser WebAssembly
+    thread_local! {
+        static INSTANCE: &'static CryptoContext = Box::leak(Box::new(CryptoContext::new()));
+    }
+    INSTANCE.with(|x| *x)
+}
+
 fn subtle() -> SubtleCrypto {
     window()
         .expect("No window object found")
@@ -38,55 +50,56 @@ impl<T> ToErrInner<T> for core::result::Result<T, JsValue> {
     }
 }
 
-pub struct Backend {
+pub struct CryptoContext {
     subtle: SubtleCrypto,
     algorithm: Object,
     sign_params: Object,
 }
 
-impl Backend {
+impl CryptoContext {
     pub fn new() -> Self {
-        Backend {
+        CryptoContext {
             subtle: subtle(),
             algorithm: create_algorithm(),
             sign_params: create_sign_params(),
         }
     }
+}
 
-    pub async fn import_pub(&self, key_data: &[u8]) -> Result<VerifyingKey> {
-        VerifyingKey::import(&self, key_data).await
-    }
+pub async fn import_pub_key(key_data: &[u8]) -> Result<VerifyingKey> {
+    VerifyingKey::import(context(), key_data).await
+}
 
-    pub async fn generate_pair(&self) -> Result<SigningKey> {
-        SigningKey::generate(&self).await
-    }
+pub async fn generate_pair() -> Result<SigningKey> {
+    SigningKey::generate(context()).await
+}
 
-    pub async fn sign(&self, key: &SigningKey, data: &[u8]) -> Result<Vec<u8>> {
-        key.sign(self, data).await
-    }
+pub async fn sign(key: &SigningKey, data: &[u8]) -> Result<Vec<u8>> {
+    key.sign(context(), data).await
+}
 
-    pub async fn verify(&self, key: &VerifyingKey, signature: &[u8], data: &[u8]) -> bool {
-        key.verify(self, signature, data).await
-    }
+pub async fn verify(key: &VerifyingKey, signature: &[u8], data: &[u8]) -> bool {
+    key.verify(context(), signature, data).await
+}
 
-    pub fn export_public_key<'a>(&self, key: &'a SigningKey) -> &'a [u8] {
-        key.exported_public_key()
-    }
+pub fn export_public_key<'a>(key: &'a SigningKey) -> &'a [u8] {
+    key.exported_public_key()
+}
 
 
-    pub async fn hash_key(&self, context: &[u8], data: &[u8]) -> Result<[u8; HASH_SIZE]> {
-        let full_data = [context, data].concat();
+pub async fn sha2_hash(ctx: &[u8], data: &[u8]) -> Result<[u8; HASH_SIZE]> {
+    let crypto = context();
+    let full_data = [ctx, data].concat();
 
-        // Safety: The first step of the digest operation is to clone the data.
-        let full_data_view: Uint8Array = unsafe { Uint8Array::view(&full_data) };
+    // Safety: The first step of the digest operation is to clone the data.
+    let full_data_view: Uint8Array = unsafe { Uint8Array::view(&full_data) };
 
-        let promise = self.subtle.digest_with_str_and_buffer_source("SHA-256", &full_data_view)
-            .map_err_internal()?;
-        let buffer: ArrayBuffer = JsFuture::from(promise).await.map_err_internal()?.unchecked_into();
-        let mut res_data = [0u8; HASH_SIZE];
-        Uint8Array::new(&buffer).copy_to(&mut res_data);
-        Ok(res_data)
-    }
+    let promise = crypto.subtle.digest_with_str_and_buffer_source("SHA-256", &full_data_view)
+        .map_err_internal()?;
+    let buffer: ArrayBuffer = JsFuture::from(promise).await.map_err_internal()?.unchecked_into();
+    let mut res_data = [0u8; HASH_SIZE];
+    Uint8Array::new(&buffer).copy_to(&mut res_data);
+    Ok(res_data)
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -96,7 +109,7 @@ pub struct SigningKey {
 }
 
 impl SigningKey {
-    async fn generate(ctx: &Backend) -> Result<Self> {
+    async fn generate(ctx: &CryptoContext) -> Result<Self> {
         let usages: Array = once("sign").map(JsValue::from).collect();
 
         let promise = ctx.subtle.generate_key_with_object(&ctx.algorithm, true, &usages)
@@ -114,7 +127,7 @@ impl SigningKey {
         })
     }
 
-    async fn sign(&self, ctx: &Backend, data: &[u8]) -> Result<Vec<u8>> {
+    async fn sign(&self, ctx: &CryptoContext, data: &[u8]) -> Result<Vec<u8>> {
         // Safety: the first step of sign requires copying the buffer.
         let data: Uint8Array = unsafe { Uint8Array::view(data) };
         let promise = ctx.subtle.sign_with_object_and_buffer_source(&ctx.sign_params, &self.private, &data)
@@ -135,7 +148,7 @@ impl SigningKey {
 pub struct VerifyingKey(CryptoKey);
 
 impl VerifyingKey {
-    async fn import(ctx: &Backend, key_data: &[u8]) -> Result<Self> {
+    async fn import(ctx: &CryptoContext, key_data: &[u8]) -> Result<Self> {
         let usages: Array = once("verify").map(JsValue::from).collect();
 
         // Safety: the first step of import_key requires copying the buffer.
@@ -147,7 +160,7 @@ impl VerifyingKey {
         Ok(VerifyingKey(res.unchecked_into()))
     }
 
-    async fn verify(&self, ctx: &Backend, signature: &[u8], data: &[u8]) -> bool {
+    async fn verify(&self, ctx: &CryptoContext, signature: &[u8], data: &[u8]) -> bool {
         let signature: Uint8Array = unsafe { Uint8Array::view(signature) };
         let data: Uint8Array = unsafe { Uint8Array::view(data) };
         let promise = ctx.subtle.verify_with_object_and_buffer_source_and_buffer_source(&ctx.sign_params, &self.0, &signature, &data)

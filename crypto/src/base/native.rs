@@ -24,43 +24,35 @@ impl SigningKey {
     }
 }
 
-pub struct Backend;
+pub async fn import_pub_key(key_data: &[u8]) -> Result<VerifyingKey> {
+    VerifyingKey::from_sec1_bytes(key_data).map_err(|_| CryptoError::ImportKeyError)
+}
 
-impl Backend {
-    pub fn new() -> Self {
-        Backend
-    }
+pub async fn generate_pair() -> Result<SigningKey> {
+    Ok(SigningKey::from_raw(RawSigningKey::random(OsRng)))
+}
 
-    pub async fn import_pub(&self, key_data: &[u8]) -> Result<VerifyingKey> {
-        VerifyingKey::from_sec1_bytes(key_data).map_err(|_| CryptoError::ImportKeyError)
-    }
+pub async fn sign(key: &SigningKey, data: &[u8]) -> Result<Vec<u8>> {
+    let s = key.raw.sign(data);
+    Ok(s.as_bytes().to_vec())
+}
 
-    pub async fn generate_pair(&self) -> Result<SigningKey> {
-        Ok(SigningKey::from_raw(RawSigningKey::random(OsRng)))
-    }
+pub async fn verify(key: &VerifyingKey, signature: &[u8], data: &[u8]) -> bool {
+    Signature::from_bytes(signature)
+        .and_then(|signature| key.verify(data, &signature))
+        .is_ok()
+}
 
-    pub async fn sign(&self, key: &SigningKey, data: &[u8]) -> Result<Vec<u8>> {
-        let s = key.raw.sign(data);
-        Ok(s.as_bytes().to_vec())
-    }
+pub fn export_public_key<'a>(key: &'a SigningKey) -> &'a [u8] {
+    key.encoded.as_bytes()
+}
 
-    pub async fn verify(&self, key: &VerifyingKey, signature: &[u8], data: &[u8]) -> bool {
-        Signature::from_bytes(signature)
-            .and_then(|signature| key.verify(data, &signature))
-            .is_ok()
-    }
+pub async fn sha2_hash(context: &[u8], data: &[u8]) -> Result<[u8; HASH_SIZE]> {
+    let mut hasher = Sha256::new();
 
-    pub fn export_public_key<'a>(&self, key: &'a SigningKey) -> &'a [u8] {
-        key.encoded.as_bytes()
-    }
-
-    pub async fn hash_key(&self, context: &[u8], data: &[u8]) -> Result<[u8; HASH_SIZE]> {
-        let mut hasher = Sha256::new();
-
-        hasher.update(context);
-        hasher.update(data);
-        Ok(hasher.finalize().as_slice().try_into().unwrap())
-    }
+    hasher.update(context);
+    hasher.update(data);
+    Ok(hasher.finalize().as_slice().try_into().unwrap())
 }
 
 #[doc(hidden)]

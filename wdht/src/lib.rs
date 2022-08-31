@@ -7,7 +7,7 @@ use reqwest::Url;
 use tokio::sync::oneshot;
 use tracing::{info, Instrument, warn};
 use wdht_wasync::{Orc, Weak, sleep, spawn};
-use wdht_logic::{config::SystemConfig, search::BasicSearchOptions, KademliaDht};
+use wdht_logic::{search::BasicSearchOptions, KademliaDht, config::SystemConfig};
 use wrtc::WrtcSender;
 
 mod identity;
@@ -24,11 +24,16 @@ pub use config::TransportConfig;
 
 use crate::events::wait_for_shutdown;
 
+pub type Dht = KademliaDht<WrtcSender>;
+pub type EventReceiver = async_broadcast::Receiver<TransportEvent>;
+// Reexport
+pub use wdht_logic as logic;
+
 pub async fn create_dht<T, I>(
     config: SystemConfig,
     transport_config: TransportConfig,
     bootstrap: T,
-) -> (Orc<KademliaDht<WrtcSender>>, async_broadcast::Receiver<TransportEvent>)
+) -> (Orc<Dht>, EventReceiver)
 where
     T: IntoIterator<Item = I>,
     I: TryInto<Url>,

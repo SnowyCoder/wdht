@@ -11,8 +11,8 @@ crate-type = ["cdylib", "rlib"]
 default = ["console_error_panic_hook"]
 
 [dependencies]
-wdht-logic = { path = "../logic", version = "0.1" }
-wdht-transport = { path = "../transport", version = "0.1", default-features = false }
+wdht = { path = "../wdht", version = "0.1", default-features = false }
+wdht-crypto = { path = "../crypto", version = "0.1" }
 tokio = { version = "1.18", features = [], default-features = false }
 
 reqwest = { version = "0.11", features = ["json"], default-features = false}
@@ -24,7 +24,6 @@ console_error_panic_hook = { version = "0.1.7", optional = true }
 gloo-timers = { version = "0.2.4", features = ["futures"] }
 js-sys = "0.3.58"
 tracing = { version = "0.1.35", features = ["max_level_info", "release_max_level_warn"] }
-sha3 = "0.10.1"
 
 # Required for wasm building!
 getrandom = { version = "0.2.6", features = ["js"] }

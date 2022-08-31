@@ -15,7 +15,7 @@
 
         let data = encoder.encode("this seems like it's working!");
 
-        let dht = await new WebDht(["http://localhost:3141"]);
+        let dht = await WebDht.create(["http://localhost:3141", "http://localhost:3142"]);
         dht.on_connection((id, chan, conn) => {
           console.log("lol", id, chan, conn);
         });
