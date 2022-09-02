@@ -61,10 +61,8 @@ enum Command {
 
 #[tokio::main]
 async fn main() {
-    let console_layer = console_subscriber::ConsoleLayer::builder().spawn();
     let fmt_layer = tracing_subscriber::fmt::layer();
     tracing_subscriber::registry()
-        .with(console_layer)
         .with(fmt_layer.with_filter(EnvFilter::from_default_env()))
         .init();
 
