@@ -17,3 +17,4 @@ tracing = { version = "0.1.34", features = ["release_max_level_info"]}
 tracing-subscriber = { version = "0.3.11", features = ["env-filter"] }
 warp = { version = "0.3.2", default-features = false }
 datachannel = { version = "0.7.8", features = ["static", "tracing"], default-features = false }
+either = "1.8.0"

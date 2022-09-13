@@ -8,6 +8,8 @@ use wdht_logic::{
 use wdht_wasync::Orc;
 use wdht_wrtc::RawConnection;
 
+use crate::TransportConfig;
+
 use super::{
     conn::WrtcConnection,
     protocol::{WrtcRequest, WrtcResponse},
@@ -83,6 +85,14 @@ async fn translate_response(
 pub struct WrtcSender(pub(crate) Orc<Connections>);
 
 impl WrtcSender {
+    pub fn config(&self) -> &TransportConfig {
+        &self.0.config
+    }
+
+    pub fn half_closed_count(&self) -> u64 {
+        self.0.half_closed_count.load(Ordering::SeqCst)
+    }
+
     pub fn connection_count(&self) -> u64 {
         self.0.connection_count.load(Ordering::SeqCst)
     }

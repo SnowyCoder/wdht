@@ -94,7 +94,7 @@ impl WebDht {
         let mut tconfig: TransportConfig = Default::default();
         tconfig.max_connections = Some(128.try_into().unwrap());
         // TODO: configuration from JS;
-        tconfig.stun_servers = vec!["stun:stun.l.google.com:19302".to_owned()];
+        tconfig.stun_servers = vec!["stun:stun.l.google.com:19302".to_owned(), "stun:stun.rossilorenzo.dev".to_owned()];
 
         let bootstrap: Vec<String> = bootstrap.into_serde().expect("Invalid bootstrap value");
         let bootstrap2: Vec<Url> = bootstrap.into_iter()

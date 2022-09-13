@@ -3,9 +3,14 @@ use std::{net::SocketAddr, num::NonZeroU64, sync::Arc, time::Duration};
 use reqwest::Url;
 use tracing::{info, span, Instrument, Level};
 use tracing_subscriber::{prelude::*, EnvFilter};
+use warp::Filter;
 use wdht::{create_dht, warp_filter::dht_connect, TransportConfig, Dht, logic::config::SystemConfig};
 
 use clap::{Args, Parser, Subcommand};
+
+use crate::server_stats::dht_query;
+
+mod server_stats;
 
 /// Web-dht server (and tester client)
 #[derive(Parser, Debug)]
@@ -116,5 +121,8 @@ async fn start_server(args: &ServerArgs) {
     let kad = start_kademlia(&args.common).await;
     info!("Starting up server");
 
-    warp::serve(dht_connect(kad)).run(args.bind).await;
+    let routes = dht_connect(kad.clone())
+        .or(dht_query(kad));
+
+    warp::serve(routes).run(args.bind).await;
 }
