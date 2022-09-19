@@ -23,9 +23,9 @@ const registry = new MessageRegistry(socket);
 </script>
 
 <template>
-  <div class="flex flex-col h-screen items-center">
+  <div class="flex flex-col h-full w-full fixed items-center">
     <Header></Header>
-    <div class="min-h-1 h-full w-2/3">
+    <div class="min-h-1 h-full w-full sm:w-2/3">
       <Chat :registry="registry" v-if="room"></Chat>
       <ChooseRoom v-else></ChooseRoom>
     </div>

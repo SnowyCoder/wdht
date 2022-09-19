@@ -5,7 +5,7 @@ use futures::future::join_all;
 use rand::Rng;
 use tokio::sync::oneshot;
 use tracing::{info, instrument};
-use reqwest::{Url, redirect};
+use reqwest::Url;
 use wdht_logic::{transport::Contact, Id};
 use wdht_wasync::{Orc, Weak, sleep, spawn};
 
@@ -19,10 +19,7 @@ async fn bootstrap_connect(url: Url, connector: Orc<Connections>) -> Result<Id, 
     let self_id = connector.self_id;
     let (offer, answer_tx, mut connection_rx) = connector.create_active(None).await?;
 
-    let client = reqwest::Client::builder()
-        .redirect(redirect::Policy::none())
-        .connection_verbose(true)
-        .build()?;
+    let client = reqwest::Client::new();
     let offer = ConnectRequest { id: self_id, offer };
 
     let r: ConnectResponse = client.post(url)

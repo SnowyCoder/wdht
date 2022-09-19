@@ -17,6 +17,13 @@ RUN cargo install --path .
 
 FROM debian:buster-slim
 COPY --from=builder /usr/local/cargo/bin/wdht-server /usr/local/bin/wdht-server
+
+RUN \
+  apt-get update && \
+  apt-get install -y ca-certificates && \
+  apt-get clean
+  
+
 ENV RUST_LOG=info
 ENTRYPOINT ["wdht-server"]
 

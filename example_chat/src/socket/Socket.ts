@@ -119,7 +119,7 @@ export class Socket<P extends DefaultPlugins = DefaultPlugins> {
         progress('download');
         await init(Promise.resolve(fetched));
         progress('bootstrap');
-        const dht = await WebDht.create(["https://wdht.rossilorenzo.dev:3141"]);
+        const dht = await WebDht.create(["https://wdht.rossilorenzo.dev", "https://wdht2.rossilorenzo.dev"]);
 
         return new Socket(dht);
     }
