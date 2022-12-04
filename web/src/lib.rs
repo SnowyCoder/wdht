@@ -1,4 +1,4 @@
-use std::{rc::Rc, time::Duration, cell::RefCell};
+use std::{rc::Rc, time::Duration, cell::RefCell, num::NonZeroU64};
 
 use js_sys::{Uint8Array, Array, Object, Reflect, Function};
 use reqwest::Url;
@@ -7,6 +7,7 @@ use wasm_bindgen::{prelude::*, JsCast};
 use wasm_bindgen_futures::{future_to_promise, spawn_local};
 use wdht::{create_dht, TransportConfig, events::TransportEvent, Dht, logic::{Id, config::SystemConfig, search::BasicSearchOptions, transport::{TopicEntry, Contact}, consts::ID_LEN}};
 use wdht_crypto::sha2_hash;
+use serde::Deserialize;
 
 // When the `wee_alloc` feature is enabled, use `wee_alloc` as the global
 // allocator.
@@ -15,6 +16,8 @@ use wdht_crypto::sha2_hash;
 static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
 
 const TOPIC_HASH_CONTEXT: &'static [u8] = b"wdht.topic";
+const DEFAULT_STUN_SERVERS: &'static [&'static str] = &["stun:stun.l.google.com:19302"];
+const DEFAULT_MAX_CONNECTIONS: Option<NonZeroU64> = NonZeroU64::new(128);
 
 #[wasm_bindgen(start)]
 pub fn on_start() {
@@ -37,7 +40,11 @@ type Topic = string | {
     key: string,
 };
 
-type BootstrapData = Array<string>;
+type BootstrapData = Array<string> | {
+    wdht_servers: Array<string>,
+    stun_servers?: Array<string>,
+    max_connections?: number,
+};
 
 type InsertPromise = Promise<number>;
 type RemovePromise = Promise<number>;
@@ -60,7 +67,7 @@ extern "C" {
     pub type Topic;
 
     #[wasm_bindgen(typescript_type = "BootstrapData")]
-    pub type BootstrapData;
+    pub type RawBootstrapData;
 
     #[wasm_bindgen(typescript_type = "InsertPromise")]
     pub type InsertPromise;
@@ -78,6 +85,41 @@ extern "C" {
     pub type ChannelOpenListener;
 }
 
+#[derive(Deserialize)]
+pub struct BootstrapDataJson {
+    pub wdht_server: Vec<String>,
+    pub stun_servers: Option<Vec<String>>,
+    pub max_connections: Option<u64>,
+}
+
+pub struct BootstrapData {
+    pub wdht_server: Vec<String>,
+    pub stun_servers: Vec<String>,
+    pub max_connections: Option<NonZeroU64>,
+}
+
+impl BootstrapData {
+    pub fn new(raw: RawBootstrapData) -> Result<Self, JsValue> {
+        match raw.into_serde() {
+            Ok(x) => return Ok(BootstrapData {
+                wdht_server: x,
+                stun_servers: DEFAULT_STUN_SERVERS.iter().map(|&x| x.to_owned()).collect(),
+                max_connections: DEFAULT_MAX_CONNECTIONS,
+            }),
+            Err(_) => {}
+        };
+
+        let raw: BootstrapDataJson = raw.into_serde().map_err(|_| JsValue::from("Invalid configuration"))?;
+        Ok(Self {
+            wdht_server: raw.wdht_server,
+            stun_servers: raw.stun_servers.unwrap_or_else(|| DEFAULT_STUN_SERVERS.iter().map(|&x| x.to_owned()).collect()),
+            max_connections: match raw.max_connections {
+                Some(x) => NonZeroU64::new(x),
+                None => DEFAULT_MAX_CONNECTIONS,
+            },
+        })
+    }
+}
 
 #[wasm_bindgen]
 pub struct WebDht {
@@ -88,19 +130,19 @@ pub struct WebDht {
 
 #[wasm_bindgen]
 impl WebDht {
-    pub async fn create(bootstrap: BootstrapData) -> Result<WebDht, JsValue> {
+    pub async fn create(bootstrap: RawBootstrapData) -> Result<WebDht, JsValue> {
+        let bootstrap = BootstrapData::new(bootstrap)?;
+
         let mut config: SystemConfig = Default::default();
         config.routing.max_routing_count = Some(64.try_into().unwrap());
         let mut tconfig: TransportConfig = Default::default();
-        tconfig.max_connections = Some(128.try_into().unwrap());
-        // TODO: configuration from JS;
-        tconfig.stun_servers = vec!["stun:stun.l.google.com:19302".to_owned(), "stun:stun.rossilorenzo.dev".to_owned()];
+        tconfig.max_connections = bootstrap.max_connections;
+        tconfig.stun_servers = bootstrap.stun_servers;
 
-        let bootstrap: Vec<String> = bootstrap.into_serde().expect("Invalid bootstrap value");
-        let bootstrap2: Vec<Url> = bootstrap.into_iter()
+        let bootstrap2: Vec<Url> = bootstrap.wdht_server.into_iter()
             .map(|x| x.parse())
             .collect::<Result<Vec<Url>, _>>()
-            .map_err(|x| JsValue::from(format!("Invalid URL: {x}")))?;
+            .map_err(|x| JsValue::from(format!("Invalid wdht bootstrap URL: {x}")))?;
 
         let (kad, mut events_rx) = create_dht(config, tconfig, bootstrap2).await;
 
