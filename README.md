@@ -39,7 +39,9 @@ When an application uses conditional compilation you can select the wasm compila
 There are only two exceptions: `web` and `example_chat`, they both have their own `README.md` explaining their commands.
 
 ## Presentations
-You can see a bit more about the project by reading the slides that I provided both for the [the 21st IEEE International Symposium on Network Computing and Applications (NCA2022, english)](nca2022.rossilorenzo.dev) and for [my thesis (italian)](https://tesi22.rossilorenzo.dev).
+You can see a bit more about the project by reading the slides that I provided both for the [the 21st IEEE International Symposium on Network Computing and Applications (NCA2022, english)](https://nca2022.rossilorenzo.dev) and for [my thesis (italian)](https://tesi22.rossilorenzo.dev).
+
+For a longer description check out the [WebDHT paper](https://secloud.ing.unimore.it/static/profiles/ferretti/papers/webdht_nca22.pdf).
 
 
 ## Rust toolchain
